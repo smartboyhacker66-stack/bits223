@@ -1,10 +1,13 @@
-
 import os
 import random
 import string
 import logging
 import tempfile
 import datetime
+import asyncio
+import threading
+
+from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -894,35 +897,51 @@ async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["admin_step"] = "awaiting_broadcast_text"
         await query.edit_message_text("Type the message you want to broadcast to all users:")
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+flask_app = Flask(__name__)
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("done", done_merge))
-    app.add_handler(CommandHandler("ok", done_braille))
-    app.add_handler(CommandHandler("support", support))
-    app.add_handler(CommandHandler("feedback", feedback_entry))
-    app.add_handler(CommandHandler("admin", admin_entry))
-    app.add_handler(CallbackQueryHandler(lang_choice, pattern="^lang_"))
-    app.add_handler(CallbackQueryHandler(category_choice, pattern="^cat_"))
-    app.add_handler(CallbackQueryHandler(admin_menu_choice, pattern="^admin_"))
-    app.add_handler(CallbackQueryHandler(mode_choice, pattern="^mode_"))
-    app.add_handler(CallbackQueryHandler(op_choice, pattern="^op_"))
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_reply))
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("done", done_merge))
+telegram_app.add_handler(CommandHandler("ok", done_braille))
+telegram_app.add_handler(CommandHandler("support", support))
+telegram_app.add_handler(CommandHandler("feedback", feedback_entry))
+telegram_app.add_handler(CommandHandler("admin", admin_entry))
+telegram_app.add_handler(CallbackQueryHandler(lang_choice, pattern="^lang_"))
+telegram_app.add_handler(CallbackQueryHandler(category_choice, pattern="^cat_"))
+telegram_app.add_handler(CallbackQueryHandler(admin_menu_choice, pattern="^admin_"))
+telegram_app.add_handler(CallbackQueryHandler(mode_choice, pattern="^mode_"))
+telegram_app.add_handler(CallbackQueryHandler(op_choice, pattern="^op_"))
+telegram_app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_reply))
 
+bot_loop = asyncio.new_event_loop()
+
+
+def run_event_loop():
+    asyncio.set_event_loop(bot_loop)
+    bot_loop.run_until_complete(telegram_app.initialize())
     if RENDER_EXTERNAL_URL:
-        logger.info("Starting bot with webhook...")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}",
+        bot_loop.run_until_complete(
+            telegram_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}")
         )
-    else:
-        logger.info("RENDER_EXTERNAL_URL not set, falling back to polling...")
-        app.run_polling()
+    bot_loop.run_forever()
+
+
+threading.Thread(target=run_event_loop, daemon=True).start()
+
+
+@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
+    return "ok"
+
+
+@flask_app.route("/", methods=["GET"])
+def index():
+    return "Bot is running."
+
 
 if __name__ == "__main__":
-    main()
+    flask_app.run(host="0.0.0.0", port=PORT)
