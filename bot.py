@@ -22,8 +22,18 @@ from gtts import gTTS
 from PIL import Image
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-import pikepdf
-import louis
+
+try:
+    import pikepdf
+    PIKEPDF_AVAILABLE = True
+except ImportError:
+    PIKEPDF_AVAILABLE = False
+
+try:
+    import louis
+    LOUIS_AVAILABLE = True
+except ImportError:
+    LOUIS_AVAILABLE = False
 
 try:
     import pytesseract
@@ -426,7 +436,7 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
 
         elif mode == "pdf_to_images":
             if not OCR_AVAILABLE:
-                await context.bot.send_message(chat.id, "PDF to Images feature unavailable on this server.")
+                await context.bot.send_message(chat.id, "PDF to Images feature is currently unavailable on this server.")
                 return
             images = convert_from_path(local_path)
             for i, img in enumerate(images):
@@ -435,6 +445,9 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
                 await context.bot.send_document(chat.id, document=open(p, "rb"))
 
         elif mode == "compress":
+            if not PIKEPDF_AVAILABLE:
+                await context.bot.send_message(chat.id, "Compress PDF feature is currently unavailable on this server.")
+                return
             out_path = os.path.join(out_dir, f"{FILE_PREFIX}_compressed.pdf")
             with pikepdf.open(local_path) as pdf:
                 pdf.save(out_path, compress_streams=True, object_stream_mode=pikepdf.ObjectStreamMode.generate)
@@ -533,6 +546,12 @@ async def done_braille(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You have not sent any text yet.")
         return
 
+    if not LOUIS_AVAILABLE:
+        await update.message.reply_text("Text to Braille feature is currently unavailable on this server.")
+        session["mode"] = None
+        session["braille_buffer"] = []
+        return
+
     full_text = "\n".join(session["braille_buffer"])
     try:
         braille_text = louis.translateString(["en-us-g1.ctb"], full_text)
@@ -578,10 +597,6 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "feedback_step" in session:
         await handle_feedback_flow(update, context, text)
-        return
-
-    if "broadcast_step" in session:
-        await handle_broadcast_flow(update, context, text)
         return
 
     if session.get("mode") == "text_to_braille":
@@ -879,10 +894,6 @@ async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["admin_step"] = "awaiting_broadcast_text"
         await query.edit_message_text("Type the message you want to broadcast to all users:")
 
-async def handle_broadcast_flow(update, context, text):
-    pass
-
-
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -914,4 +925,4 @@ def main():
         app.run_polling()
 
 if __name__ == "__main__":
-  main()
+    main()
