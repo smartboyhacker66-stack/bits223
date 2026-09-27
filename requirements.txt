@@ -6,3 +6,5 @@ gTTS==2.5.3
 Pillow==10.4.0
 reportlab==4.2.5
 flask==3.0.3
+firebase-admin==6.5.0
+pytz==2024.2
