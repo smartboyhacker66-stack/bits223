@@ -10,3 +10,4 @@ pytz==2024.2
 deep-translator==1.11.4
 pdf2docx==0.5.8
 openpyxl==3.1.5
+python-docx==1.1.2 
