@@ -6,6 +6,7 @@ import tempfile
 import datetime
 import asyncio
 import threading
+import hashlib
 
 import pytz
 from flask import Flask, request
@@ -77,6 +78,14 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+try:
+    import google.generativeai as genai
+    GEMINI_SDK_AVAILABLE = True
+except ImportError:
+    GEMINI_SDK_AVAILABLE = False
+
+import base64
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -93,37 +102,117 @@ FILE_PREFIX = "BlindIndianTechSupport"
 SUPPORT_EMAIL = "bits.headquarter505@gmail.com"
 SUPPORT_IMAGE_PATH = "support.jpg"
 
-VERSION_NAME = "Blind Indian Tech Support 2.1 Beta - Super 3.2.5 Major Upgrade"
-VERSION_RELEASE_ISO = "2026-09-29T00:00:00"
+VERSION_NAME = "Blind Indian Tech Support 2.2 - 3.3.2.5 Major Super Upgrade - Gel Core Upgrade"
+VERSION_RELEASE_ISO = "2026-10-01T00:00:00"
 
 SESSION_TIMEOUT_SECONDS = 120
 PDF_TO_WORD_MAX_PAGES = 50
 IST = pytz.timezone("Asia/Kolkata")
 
-# Language codes as used by deep-translator (Google Translate codes)
+# Language codes as used by deep-translator (Google Translate codes).
+# Odia's Google Translate code is "or"; if that ever stops working we
+# automatically retry with the full language name "odia" below.
 TRANSLATE_LANG_CODES = {
     "hi": "hi",
     "mr": "mr",
     "or": "or",
 }
+TRANSLATE_LANG_CODE_FALLBACKS = {
+    "or": "odia",
+}
+
+TRANSLATION_CACHE = {}  # in-memory cache: (lang, text) -> translated text
+
+
+def _cache_key(text, lang):
+    digest = hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
+    return f"{lang}_{digest}"
+
+
+def _translate_line(line, lang):
+    """Translate a single short line of text, with in-memory + Firestore
+    caching and a safe fallback to the original English line if anything
+    goes wrong. Translating line-by-line (instead of a whole paragraph at
+    once) is far more reliable with Google Translate."""
+    if not line.strip():
+        return line
+
+    mem_key = (lang, line)
+    if mem_key in TRANSLATION_CACHE:
+        return TRANSLATION_CACHE[mem_key]
+
+    cache_doc_id = _cache_key(line, lang)
+    cached = fb_get("translation_cache", cache_doc_id)
+    if cached and cached.get("translated"):
+        TRANSLATION_CACHE[mem_key] = cached["translated"]
+        return cached["translated"]
+
+    if not TRANSLATOR_AVAILABLE:
+        return line
+
+    target = TRANSLATE_LANG_CODES.get(lang)
+    if not target:
+        return line
+
+    translated = None
+    try:
+        translated = GoogleTranslator(source="en", target=target).translate(line)
+    except Exception:
+        fallback_target = TRANSLATE_LANG_CODE_FALLBACKS.get(lang)
+        if fallback_target:
+            try:
+                translated = GoogleTranslator(source="en", target=fallback_target).translate(line)
+            except Exception:
+                translated = None
+
+    if not translated or not translated.strip():
+        logger.warning(f"Translation failed for line, falling back to English: {line[:50]}")
+        return line
+
+    TRANSLATION_CACHE[mem_key] = translated
+    fb_set("translation_cache", cache_doc_id, {"lang": lang, "original": line, "translated": translated})
+    return translated
 
 
 def tr(text, lang):
-    """Translate an English string into the target language using deep-translator.
-    Falls back silently to the original English text if translation is unavailable
-    or fails, so the bot never crashes because of a translation error."""
+    """Translate an English string (which may have multiple lines) into the
+    target language, line by line, so a problem with one line never breaks
+    the rest of the message. Falls back silently to English wherever a
+    single line's translation is not possible."""
     if not text or lang == "en":
         return text
     if not TRANSLATOR_AVAILABLE:
         return text
-    target = TRANSLATE_LANG_CODES.get(lang)
-    if not target:
-        return text
+    lines = text.split("\n")
+    translated_lines = [_translate_line(line, lang) for line in lines]
+    return "\n".join(translated_lines)
+
+
+def encode_key(raw_key):
+    """Lightly obscure an API key before storing it in Firestore. This is
+    not strong encryption, just protection against a casual glance at the
+    raw database contents."""
+    return base64.b64encode(raw_key.encode("utf-8")).decode("utf-8")
+
+
+def decode_key(encoded_key):
     try:
-        return GoogleTranslator(source="en", target=target).translate(text)
+        return base64.b64decode(encoded_key.encode("utf-8")).decode("utf-8")
     except Exception:
-        logger.warning("Translation failed, falling back to English.")
-        return text
+        return None
+
+
+FUNNY_QUOTA_MESSAGE = {
+    "en": "Sorry buddy, Gemini fell asleep 😴 Its free quota is finished for now. Please try again later.",
+    "hi": "सॉरी भाई, Gemini सो गया 😴 उसका फ्री कोटा अभी खत्म हो गया है। थोड़ी देर बाद फिर कोशिश करें।",
+    "mr": "सॉरी दोस्ता, Gemini झोपला 😴 त्याचा फ्री कोटा सध्या संपला आहे. थोड्या वेळाने पुन्हा प्रयत्न करा.",
+}
+
+
+def funny_quota_message(lang):
+    if lang in FUNNY_QUOTA_MESSAGE:
+        return FUNNY_QUOTA_MESSAGE[lang]
+    return tr(FUNNY_QUOTA_MESSAGE["en"], lang)
 
 
 def ist_now():
@@ -617,6 +706,7 @@ ACCOUNT_MENU = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("Create Account", callback_data="mode_create_account")],
         [InlineKeyboardButton("Request a Feature", callback_data="mode_feature_request")],
+        [InlineKeyboardButton("Set Gemini API Key (for AI Summary)", callback_data="mode_set_gemini_key")],
     ]
 )
 
@@ -640,6 +730,7 @@ SINGLE_FILE_OPS = InlineKeyboardMarkup(
         [InlineKeyboardButton("PDF to Word (Beta)", callback_data="op_pdf_to_word")],
         [InlineKeyboardButton("Search a Word", callback_data="op_pdf_search")],
         [InlineKeyboardButton("PDF Info", callback_data="op_pdf_info")],
+        [InlineKeyboardButton("AI Summary (Gemini)", callback_data="op_ai_summary")],
     ]
 )
 
@@ -657,15 +748,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(user.id, user.username)
     lang = session.get("language", "en")
 
-    account = fb_get("users", str(user.id))
-    if account and account.get("name"):
-        greeting_template = NAME_GREETING.get(lang, NAME_GREETING["en"])
-        greeting = tt(greeting_template, lang) if lang not in NAME_GREETING else greeting_template
-        try:
-            greeting = greeting.format(name=account["name"])
-        except Exception:
-            greeting = f"Hello {account['name']}!"
-        await update.message.reply_text(greeting)
+    is_admin = ADMIN_STATE["admin_id"] is not None and user.id == ADMIN_STATE["admin_id"]
+
+    if is_admin:
+        admin_welcome = tt("Welcome back, Admin! 👑 Everything is under your control.", lang)
+        await update.message.reply_text(admin_welcome)
+        await update.message.reply_text(tt("✅ Verified Admin Account", lang))
+    else:
+        account = fb_get("users", str(user.id))
+        if account and account.get("name"):
+            greeting_template = NAME_GREETING.get(lang, NAME_GREETING["en"])
+            greeting = tt(greeting_template, lang) if lang not in NAME_GREETING else greeting_template
+            try:
+                greeting = greeting.format(name=account["name"])
+            except Exception:
+                greeting = f"Hello {account['name']}!"
+            await update.message.reply_text(greeting)
 
     await update.message.reply_text(WELCOME_MESSAGES.get(lang, WELCOME_MESSAGES["en"]) if lang in WELCOME_MESSAGES else tt(WELCOME_MESSAGES["en"], lang))
     await update.message.reply_text("Please select your preferred language:", reply_markup=LANG_MENU)
@@ -738,6 +836,24 @@ async def mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["feature_request_step"] = True
         await query.edit_message_text(
             tt("Please type the feature you would like us to add:", lang)
+        )
+        return
+
+    if session["mode"] == "set_gemini_key":
+        account = fb_get("users", str(user_id))
+        if not account:
+            await query.edit_message_text(
+                tt("Something went wrong. Please create an account first.", lang)
+            )
+            session["mode"] = None
+            return
+        session["gemini_key_step"] = True
+        await query.edit_message_text(
+            tt(
+                "Please paste your Gemini API key. It will be stored so you can use the AI "
+                "Summary feature on your PDFs.",
+                lang,
+            )
         )
         return
 
@@ -1080,6 +1196,60 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
             await context.bot.send_message(chat.id, info_text)
             await show_post_action_menu(update, context, chat.id, lang)
 
+        elif mode == "ai_summary":
+            account = fb_get("users", str(user.id))
+            if not account:
+                await context.bot.send_message(
+                    chat.id, tt("Something went wrong. Please create an account first.", lang)
+                )
+                return
+            enc_key = account.get("gemini_key_enc")
+            if not enc_key:
+                await context.bot.send_message(
+                    chat.id,
+                    tt(
+                        "Please set your Gemini API key first from the My Account menu "
+                        "(Set Gemini API Key).",
+                        lang,
+                    ),
+                )
+                return
+            if not GEMINI_SDK_AVAILABLE:
+                await context.bot.send_message(
+                    chat.id, tt("AI Summary feature is currently unavailable on this server.", lang)
+                )
+                return
+            raw_key = decode_key(enc_key)
+            if not raw_key:
+                await context.bot.send_message(
+                    chat.id, tt("Your saved Gemini API key looks invalid. Please set it again.", lang)
+                )
+                return
+            pdf_text = extract_text_with_ocr_fallback(local_path)
+            if not pdf_text.strip():
+                await context.bot.send_message(chat.id, t("no_text_found", lang))
+                return
+            await context.bot.send_message(chat.id, tt("Generating AI summary, please wait...", lang))
+            try:
+                genai.configure(api_key=raw_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                prompt = (
+                    "Summarize the following document text in clear, simple language, "
+                    "in about 150-250 words:\n\n" + pdf_text[:15000]
+                )
+                response = model.generate_content(prompt)
+                summary_text = response.text if hasattr(response, "text") else str(response)
+                await context.bot.send_message(chat.id, tt("AI Summary:", lang) + "\n\n" + summary_text)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "quota" in err_str or "429" in err_str or "resource_exhausted" in err_str:
+                    await context.bot.send_message(chat.id, funny_quota_message(lang))
+                else:
+                    logger.exception("Error in ai_summary")
+                    log_error(user.id, str(e))
+                    await context.bot.send_message(chat.id, tt(f"An error occurred: {e}", lang))
+            await show_post_action_menu(update, context, chat.id, lang)
+
         if session.get("pending_action") is None:
             session["mode"] = None
 
@@ -1328,6 +1498,16 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await update.message.reply_text(
             tt(f"Your request {request_number} has been sent to the admin. Thank you!", lang)
+        )
+        return
+
+    if session.get("gemini_key_step"):
+        session.pop("gemini_key_step", None)
+        session["mode"] = None
+        raw_key = text.strip()
+        fb_set("users", str(user.id), {"gemini_key_enc": encode_key(raw_key)})
+        await update.message.reply_text(
+            tt("Success! Your Gemini API key has been saved. You can now use AI Summary on your PDFs.", lang)
         )
         return
 
@@ -1617,29 +1797,56 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(caption)
 
 
+WHATSNEW_BODY = {
+    "en": (
+        "What's new in this version:\n"
+        "- Reliable line-by-line translation for every language\n"
+        "- Faster translations using a saved translation cache\n"
+        "- New: AI Summary powered by your own Gemini API key\n"
+        "- PDF to Word conversion (Beta, up to 50 pages)\n"
+        "- Admin gets a special welcome and a verified admin badge\n"
+        "- Deleting a user account now asks for a reason and notifies the user\n"
+    ),
+    "hi": (
+        "इस वर्शन में नया क्या है:\n"
+        "- अब हर भाषा में भरोसेमंद, लाइन-दर-लाइन अनुवाद\n"
+        "- अनुवाद कैश की वजह से जवाब अब तेज़ आएंगे\n"
+        "- नया: आपकी अपनी Gemini API कुंजी से AI Summary फीचर\n"
+        "- PDF से Word रूपांतरण (बीटा, 50 पेज तक)\n"
+        "- एडमिन को खास वेलकम मैसेज और वेरिफाइड बैज मिलेगा\n"
+        "- किसी यूज़र का अकाउंट डिलीट करने पर अब कारण पूछा जाएगा और यूज़र को सूचित किया जाएगा\n"
+    ),
+    "mr": (
+        "या वर्शनमध्ये नवीन काय आहे:\n"
+        "- आता प्रत्येक भाषेत विश्वासार्ह, ओळीने-ओळ भाषांतर\n"
+        "- भाषांतर कॅशेमुळे उत्तरे आता जलद येतील\n"
+        "- नवीन: तुमच्या स्वतःच्या Gemini API की वापरून AI Summary फीचर\n"
+        "- PDF ते Word रूपांतरण (बीटा, 50 पानांपर्यंत)\n"
+        "- अॅडमिनला खास वेलकम मेसेज आणि व्हेरिफाइड बॅज मिळेल\n"
+        "- युजरचे खाते डिलीट करताना आता कारण विचारले जाईल आणि युजरला कळवले जाईल\n"
+    ),
+}
+
+WHATSNEW_HEADER = {
+    "en": "Current version: {v}\nReleased: {d}\n\n",
+    "hi": "वर्तमान वर्शन: {v}\nरिलीज़ तारीख: {d}\n\n",
+    "mr": "सध्याची आवृत्ती: {v}\nप्रकाशन तारीख: {d}\n\n",
+}
+
+
 async def whatsnew(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     session = get_session(user.id, user.username)
     lang = session["language"]
-    body = (
-        "What's new in this version:\n"
-        "- Automatic translation for all languages, including new Odia support\n"
-        "- Clearer rating buttons that work well with screen readers\n"
-        "- Admin can now clear session or user data from the database\n"
-        "- Extracted text now shows clear page numbers\n"
-        "- New: PDF to Excel (extract tables)\n"
-        "- New: PDF to Word (Beta, up to 50 pages)\n"
-        "- New: Search for a word inside a PDF\n"
-        "- New: Word (.docx) file to Audio\n"
-        "- New: Text to Audio\n"
-        "- New: PDF Info (page count, word count, reading time)\n"
-        "- New: Request a Feature from the My Account menu\n"
-        "- Admin sessions no longer time out\n"
-        "- Returning users are now greeted by name\n"
-    )
-    header = f"Current version: {VERSION_NAME}\nReleased: {VERSION_RELEASE_ISO}\n\n"
-    text = header + tt(body, lang) if lang != "en" else header + body
-    await update.message.reply_text(text)
+
+    if lang in WHATSNEW_BODY:
+        body = WHATSNEW_BODY[lang]
+        header = WHATSNEW_HEADER[lang].format(v=VERSION_NAME, d=VERSION_RELEASE_ISO)
+    else:
+        body = tr(WHATSNEW_BODY["en"], lang)
+        header = WHATSNEW_HEADER["en"].format(v=VERSION_NAME, d=VERSION_RELEASE_ISO)
+
+    await update.message.reply_text(header + body)
 
 
 async def feedback_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1807,9 +2014,31 @@ async def handle_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     if session.get("admin_step") == "awaiting_delete_user":
+        session["admin_step"] = "awaiting_delete_reason"
+        session["admin_delete_target"] = text.strip()
+        await update.message.reply_text(
+            "Why are you deleting this account? Type the reason (it will be sent to the user):"
+        )
+        return
+
+    if session.get("admin_step") == "awaiting_delete_reason":
         session.pop("admin_step", None)
-        fb_delete("users", text.strip())
-        await update.message.reply_text("If that account existed, it has been deleted.", reply_markup=ADMIN_MENU)
+        target_id = session.pop("admin_delete_target", None)
+        reason = text.strip()
+        account = fb_get("users", target_id) if target_id else None
+        fb_delete("users", target_id)
+        if account:
+            try:
+                await context.bot.send_message(
+                    int(target_id),
+                    f"Admin has deleted your account for the following reason:\n\n{reason}",
+                )
+            except Exception:
+                pass
+        await update.message.reply_text(
+            "If that account existed, it has been deleted and the user notified.",
+            reply_markup=ADMIN_MENU,
+        )
         return
 
     if session.get("admin_step") == "awaiting_msguser_id":
