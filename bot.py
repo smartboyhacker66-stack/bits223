@@ -53,6 +53,30 @@ try:
 except ImportError:
     FIREBASE_SDK_AVAILABLE = False
 
+try:
+    from deep_translator import GoogleTranslator
+    TRANSLATOR_AVAILABLE = True
+except ImportError:
+    TRANSLATOR_AVAILABLE = False
+
+try:
+    from pdf2docx import Converter as PDF2DocxConverter
+    PDF2DOCX_AVAILABLE = True
+except ImportError:
+    PDF2DOCX_AVAILABLE = False
+
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    import docx as python_docx
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -69,11 +93,37 @@ FILE_PREFIX = "BlindIndianTechSupport"
 SUPPORT_EMAIL = "bits.headquarter505@gmail.com"
 SUPPORT_IMAGE_PATH = "support.jpg"
 
-VERSION_NAME = "Version 2.0 - Foundation Update"
-VERSION_RELEASE_ISO = "2026-09-27T00:00:00"
+VERSION_NAME = "Blind Indian Tech Support 2.1 Beta - Super 3.2.5 Major Upgrade"
+VERSION_RELEASE_ISO = "2026-09-29T00:00:00"
 
 SESSION_TIMEOUT_SECONDS = 120
+PDF_TO_WORD_MAX_PAGES = 50
 IST = pytz.timezone("Asia/Kolkata")
+
+# Language codes as used by deep-translator (Google Translate codes)
+TRANSLATE_LANG_CODES = {
+    "hi": "hi",
+    "mr": "mr",
+    "or": "or",
+}
+
+
+def tr(text, lang):
+    """Translate an English string into the target language using deep-translator.
+    Falls back silently to the original English text if translation is unavailable
+    or fails, so the bot never crashes because of a translation error."""
+    if not text or lang == "en":
+        return text
+    if not TRANSLATOR_AVAILABLE:
+        return text
+    target = TRANSLATE_LANG_CODES.get(lang)
+    if not target:
+        return text
+    try:
+        return GoogleTranslator(source="en", target=target).translate(text)
+    except Exception:
+        logger.warning("Translation failed, falling back to English.")
+        return text
 
 
 def ist_now():
@@ -189,6 +239,17 @@ MARATHI_DISCLAIMER = (
     "मराठी भाषांतर सुविधा पुरवठादार: Blind Indian Tech Support."
 )
 
+ODIA_DISCLAIMER_EN = (
+    "Notice: Odia language support is currently under testing. Some translations may contain "
+    "errors. Odia translation provided by Blind Indian Tech Support."
+)
+
+NAME_GREETING = {
+    "en": "Hello {name}!",
+    "hi": "नमस्ते {name}!",
+    "mr": "नमस्कार {name}!",
+}
+
 TXT = {
     "category_prompt": {
         "en": "A full suite of PDF operations — select a category to get started.\n\nYou can also directly send a PDF file to see available operations for it.",
@@ -275,7 +336,20 @@ TXT = {
 
 def t(key, lang):
     entry = TXT.get(key, {})
-    return entry.get(lang, entry.get("en", ""))
+    if lang in entry:
+        return entry[lang]
+    # No pre-written translation for this language (e.g. Odia) - translate the
+    # English version on the fly using deep-translator.
+    en_text = entry.get("en", "")
+    return tr(en_text, lang)
+
+
+def tt(text, lang):
+    """Translate a plain (not pre-written) English string for any non-English,
+    non-pre-written language. Used for messages that are not in the TXT dict."""
+    if lang in ("en",):
+        return text
+    return tr(text, lang)
 
 
 def generate_session_id():
@@ -293,12 +367,17 @@ def generate_auth_token():
 def get_session(user_id, username=None):
     now = ist_now()
     s = SESSIONS.get(user_id)
+    is_admin = ADMIN_STATE["admin_id"] is not None and user_id == ADMIN_STATE["admin_id"]
 
-    needs_new_session = (
-        s is None
-        or s.get("ended")
-        or (now - s["last_active"]).total_seconds() > SESSION_TIMEOUT_SECONDS
-    )
+    if is_admin:
+        # Admin sessions never time out due to inactivity.
+        needs_new_session = s is None or s.get("ended")
+    else:
+        needs_new_session = (
+            s is None
+            or s.get("ended")
+            or (now - s["last_active"]).total_seconds() > SESSION_TIMEOUT_SECONDS
+        )
 
     if needs_new_session:
         sid = generate_session_id()
@@ -390,17 +469,32 @@ async def notify_session_id(update, context, user_id):
     )
 
 
-RATING_MENU = InlineKeyboardMarkup(
-    [
+STAR_LABELS = {
+    1: {"en": "1 - Very Poor", "hi": "1 - बहुत खराब", "mr": "1 - अतिशय वाईट"},
+    2: {"en": "2 - Poor", "hi": "2 - खराब", "mr": "2 - वाईट"},
+    3: {"en": "3 - Okay", "hi": "3 - ठीक-ठाक", "mr": "3 - ठीक आहे"},
+    4: {"en": "4 - Good", "hi": "4 - अच्छा", "mr": "4 - चांगले"},
+    5: {"en": "5 - Excellent", "hi": "5 - बहुत बढ़िया", "mr": "5 - उत्कृष्ट"},
+}
+
+
+def star_label(stars, lang):
+    entry = STAR_LABELS.get(stars, {})
+    if lang in entry:
+        return entry[lang]
+    return tr(entry.get("en", str(stars)), lang)
+
+
+def build_rating_menu(lang):
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("⭐", callback_data="rate_1"),
-            InlineKeyboardButton("⭐⭐", callback_data="rate_2"),
-            InlineKeyboardButton("⭐⭐⭐", callback_data="rate_3"),
-            InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rate_4"),
-            InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rate_5"),
+            [InlineKeyboardButton(star_label(1, lang), callback_data="rate_1")],
+            [InlineKeyboardButton(star_label(2, lang), callback_data="rate_2")],
+            [InlineKeyboardButton(star_label(3, lang), callback_data="rate_3")],
+            [InlineKeyboardButton(star_label(4, lang), callback_data="rate_4")],
+            [InlineKeyboardButton(star_label(5, lang), callback_data="rate_5")],
         ]
-    ]
-)
+    )
 
 
 async def session_watcher():
@@ -411,6 +505,8 @@ async def session_watcher():
             for user_id, s in list(SESSIONS.items()):
                 if s.get("ended"):
                     continue
+                if ADMIN_STATE["admin_id"] is not None and user_id == ADMIN_STATE["admin_id"]:
+                    continue  # Admin sessions never terminate on inactivity.
                 if (now - s["last_active"]).total_seconds() > SESSION_TIMEOUT_SECONDS:
                     await finalize_session(user_id, s)
         except Exception:
@@ -439,7 +535,7 @@ async def finalize_session(user_id, s):
         await telegram_app.bot.send_message(
             user_id,
             t("session_ended", lang).format(duration=duration_text),
-            reply_markup=RATING_MENU,
+            reply_markup=build_rating_menu(lang),
         )
     except Exception:
         pass
@@ -450,6 +546,7 @@ LANG_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("हिन्दी (भारत)", callback_data="lang_hi")],
         [InlineKeyboardButton("English (UK)", callback_data="lang_en")],
         [InlineKeyboardButton("मराठी (भारत)", callback_data="lang_mr")],
+        [InlineKeyboardButton("ଓଡ଼ିଆ (India)", callback_data="lang_or")],
     ]
 )
 
@@ -474,6 +571,8 @@ CREATE_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Images to PDF", callback_data="mode_images_to_pdf")],
         [InlineKeyboardButton("Text to PDF", callback_data="mode_text_to_pdf")],
         [InlineKeyboardButton("Text to Braille", callback_data="mode_text_to_braille")],
+        [InlineKeyboardButton("Text to Audio", callback_data="mode_text_to_audio")],
+        [InlineKeyboardButton("Word File to Audio (send .docx)", callback_data="mode_word_to_audio")],
     ]
 )
 
@@ -493,6 +592,8 @@ TRANSFORM_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Compress PDF", callback_data="mode_compress")],
         [InlineKeyboardButton("Resize PDF", callback_data="mode_resize")],
         [InlineKeyboardButton("Rotate Pages", callback_data="mode_rotate")],
+        [InlineKeyboardButton("PDF to Excel", callback_data="mode_pdf_to_excel")],
+        [InlineKeyboardButton("PDF to Word (Beta)", callback_data="mode_pdf_to_word")],
     ]
 )
 
@@ -505,11 +606,18 @@ ANNOTATE_MENU = InlineKeyboardMarkup(
 )
 
 INSPECT_MENU = InlineKeyboardMarkup(
-    [[InlineKeyboardButton("View PDF Metadata", callback_data="mode_metadata")]]
+    [
+        [InlineKeyboardButton("View PDF Metadata", callback_data="mode_metadata")],
+        [InlineKeyboardButton("Search a Word in PDF", callback_data="mode_pdf_search")],
+        [InlineKeyboardButton("PDF Info (pages, words, time)", callback_data="mode_pdf_info")],
+    ]
 )
 
 ACCOUNT_MENU = InlineKeyboardMarkup(
-    [[InlineKeyboardButton("Create Account", callback_data="mode_create_account")]]
+    [
+        [InlineKeyboardButton("Create Account", callback_data="mode_create_account")],
+        [InlineKeyboardButton("Request a Feature", callback_data="mode_feature_request")],
+    ]
 )
 
 SINGLE_FILE_OPS = InlineKeyboardMarkup(
@@ -528,6 +636,10 @@ SINGLE_FILE_OPS = InlineKeyboardMarkup(
         [InlineKeyboardButton("Lock PDF", callback_data="op_lock")],
         [InlineKeyboardButton("Unlock PDF", callback_data="op_unlock")],
         [InlineKeyboardButton("View Metadata", callback_data="op_metadata")],
+        [InlineKeyboardButton("PDF to Excel", callback_data="op_pdf_to_excel")],
+        [InlineKeyboardButton("PDF to Word (Beta)", callback_data="op_pdf_to_word")],
+        [InlineKeyboardButton("Search a Word", callback_data="op_pdf_search")],
+        [InlineKeyboardButton("PDF Info", callback_data="op_pdf_info")],
     ]
 )
 
@@ -542,8 +654,20 @@ TEXT_OUTPUT_MENU = InlineKeyboardMarkup(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     SESSIONS.pop(user.id, None)
-    get_session(user.id, user.username)
-    await update.message.reply_text(WELCOME_MESSAGES["en"])
+    session = get_session(user.id, user.username)
+    lang = session.get("language", "en")
+
+    account = fb_get("users", str(user.id))
+    if account and account.get("name"):
+        greeting_template = NAME_GREETING.get(lang, NAME_GREETING["en"])
+        greeting = tt(greeting_template, lang) if lang not in NAME_GREETING else greeting_template
+        try:
+            greeting = greeting.format(name=account["name"])
+        except Exception:
+            greeting = f"Hello {account['name']}!"
+        await update.message.reply_text(greeting)
+
+    await update.message.reply_text(WELCOME_MESSAGES.get(lang, WELCOME_MESSAGES["en"]) if lang in WELCOME_MESSAGES else tt(WELCOME_MESSAGES["en"], lang))
     await update.message.reply_text("Please select your preferred language:", reply_markup=LANG_MENU)
 
 
@@ -558,6 +682,8 @@ async def lang_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lang_code == "mr":
         await context.bot.send_message(query.message.chat.id, MARATHI_DISCLAIMER)
+    elif lang_code == "or":
+        await context.bot.send_message(query.message.chat.id, tr(ODIA_DISCLAIMER_EN, "or"))
 
     await query.edit_message_text(
         t("category_prompt", lang_code),
@@ -598,7 +724,27 @@ async def mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if session["mode"] == "create_account":
         session["account_step"] = "name"
-        await query.edit_message_text("Please type your Name:")
+        await query.edit_message_text(tt("Please type your Name:", lang))
+        return
+
+    if session["mode"] == "feature_request":
+        account = fb_get("users", str(user_id))
+        if not account:
+            await query.edit_message_text(
+                tt("Something went wrong. Please create an account first.", lang)
+            )
+            session["mode"] = None
+            return
+        session["feature_request_step"] = True
+        await query.edit_message_text(
+            tt("Please type the feature you would like us to add:", lang)
+        )
+        return
+
+    if session["mode"] == "word_to_audio":
+        await query.edit_message_text(
+            tt("Please send a Word (.docx) file. I will read it out as audio.", lang)
+        )
         return
 
     prompts = {
@@ -618,8 +764,17 @@ async def mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "images_to_pdf": "Send the images (one by one) you want to combine into a PDF. Type /done when finished.",
         "text_to_pdf": "Type or paste the text you want converted into a PDF.",
         "text_to_braille": "Send your text, one or more messages. When finished, type /ok and I will convert everything into Braille.",
+        "text_to_audio": "Type or paste the text you want to hear as audio.",
+        "pdf_to_excel": "Send the PDF. I will try to extract any tables into an Excel file.",
+        "pdf_to_word": (
+            f"Send the PDF you want converted to a Word document. "
+            f"Note: this feature is still under testing, and only works for PDFs up to "
+            f"{PDF_TO_WORD_MAX_PAGES} pages."
+        ),
+        "pdf_search": "Send the PDF. Then tell me the word or phrase to search for.",
+        "pdf_info": "Send the PDF to see its page count, word count, and estimated reading time.",
     }
-    await query.edit_message_text(prompts.get(session["mode"], "Send the file."))
+    await query.edit_message_text(tt(prompts.get(session["mode"], "Send the file."), lang))
     await notify_session_id(update, context, user_id)
 
 
@@ -673,25 +828,35 @@ async def op_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_single_file_mode(update, context, mode, local_path, query=query)
 
 
-def extract_text_with_ocr_fallback(pdf_path, page_numbers=None):
+def extract_text_with_ocr_fallback(pdf_path, page_numbers=None, label_pages=False, lang="en"):
     text = ""
+    page_label_word = tt("Page", lang) if label_pages else "Page"
     with pdfplumber.open(pdf_path) as pdf:
         pages = pdf.pages
-        if page_numbers:
-            pages = [pdf.pages[i - 1] for i in page_numbers if 0 < i <= len(pdf.pages)]
-        for page in pages:
-            page_text = page.extract_text()
+        indices = page_numbers if page_numbers else list(range(1, len(pdf.pages) + 1))
+        for i in indices:
+            if not (0 < i <= len(pdf.pages)):
+                continue
+            page_text = pdf.pages[i - 1].extract_text()
             if page_text:
-                text += page_text + "\n"
+                if label_pages:
+                    text += f"{page_label_word} {i}:\n{page_text}\n\n"
+                else:
+                    text += page_text + "\n"
     if text.strip():
         return text
     if OCR_AVAILABLE:
         images = convert_from_path(pdf_path)
-        if page_numbers:
-            images = [images[i - 1] for i in page_numbers if 0 < i <= len(images)]
+        indices = page_numbers if page_numbers else list(range(1, len(images) + 1))
         ocr_text = ""
-        for img in images:
-            ocr_text += pytesseract.image_to_string(img, lang="eng") + "\n"
+        for i in indices:
+            if not (0 < i <= len(images)):
+                continue
+            page_text = pytesseract.image_to_string(images[i - 1], lang="eng")
+            if label_pages:
+                ocr_text += f"{page_label_word} {i}:\n{page_text}\n\n"
+            else:
+                ocr_text += page_text + "\n"
         return ocr_text
     return ""
 
@@ -827,6 +992,94 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
             await context.bot.send_message(chat.id, info)
             await show_post_action_menu(update, context, chat.id, lang)
 
+        elif mode == "pdf_to_excel":
+            if not OPENPYXL_AVAILABLE:
+                await context.bot.send_message(
+                    chat.id, tt("PDF to Excel feature is currently unavailable on this server.", lang)
+                )
+                return
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
+            found_any_table = False
+            with pdfplumber.open(local_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    tables = page.extract_tables()
+                    for t_idx, table in enumerate(tables, start=1):
+                        found_any_table = True
+                        sheet_name = f"Page{page_num}_T{t_idx}"[:31]
+                        ws = wb.create_sheet(title=sheet_name)
+                        for row in table:
+                            ws.append([cell if cell is not None else "" for cell in row])
+            if not found_any_table:
+                await context.bot.send_message(chat.id, tt("No tables were found in this PDF.", lang))
+                return
+            out_path = os.path.join(out_dir, f"{FILE_PREFIX}_tables.xlsx")
+            wb.save(out_path)
+            await context.bot.send_document(chat.id, document=open(out_path, "rb"))
+            await show_post_action_menu(update, context, chat.id, lang)
+
+        elif mode == "pdf_to_word":
+            if not PDF2DOCX_AVAILABLE:
+                await context.bot.send_message(
+                    chat.id, tt("PDF to Word feature is currently unavailable on this server.", lang)
+                )
+                return
+            reader = PdfReader(local_path)
+            if len(reader.pages) > PDF_TO_WORD_MAX_PAGES:
+                await context.bot.send_message(
+                    chat.id,
+                    tt(
+                        f"This PDF has more than {PDF_TO_WORD_MAX_PAGES} pages. This feature is "
+                        f"still under testing and is limited to {PDF_TO_WORD_MAX_PAGES} pages for now. "
+                        "You can use Split or Cut/Extract Pages to make a smaller PDF first.",
+                        lang,
+                    ),
+                )
+                return
+            await context.bot.send_message(
+                chat.id,
+                tt(
+                    "Note: PDF to Word is still under testing and may not always be perfectly "
+                    "accurate. Converting now, please wait...",
+                    lang,
+                ),
+            )
+            out_path = os.path.join(out_dir, f"{FILE_PREFIX}_converted.docx")
+            cv = PDF2DocxConverter(local_path)
+            cv.convert(out_path)
+            cv.close()
+            await context.bot.send_document(chat.id, document=open(out_path, "rb"))
+            await show_post_action_menu(update, context, chat.id, lang)
+
+        elif mode == "pdf_search":
+            session["pending_path"] = local_path
+            session["pending_action"] = "pdf_search"
+            await context.bot.send_message(chat.id, tt("What word or phrase should I search for?", lang))
+
+        elif mode == "pdf_info":
+            reader = PdfReader(local_path)
+            num_pages = len(reader.pages)
+            text = extract_text_with_ocr_fallback(local_path)
+            word_count = len(text.split()) if text.strip() else 0
+            reading_minutes = max(1, round(word_count / 200)) if word_count else 0
+            file_size_kb = round(os.path.getsize(local_path) / 1024, 1)
+            info_text = tt(
+                "PDF Information:\nPages: {pages}\nWords: {words}\nEstimated reading time: "
+                "{minutes} minute(s)\nFile size: {size} KB",
+                lang,
+            )
+            try:
+                info_text = info_text.format(
+                    pages=num_pages, words=word_count, minutes=reading_minutes, size=file_size_kb
+                )
+            except Exception:
+                info_text = (
+                    f"PDF Information:\nPages: {num_pages}\nWords: {word_count}\n"
+                    f"Estimated reading time: {reading_minutes} minute(s)\nFile size: {file_size_kb} KB"
+                )
+            await context.bot.send_message(chat.id, info_text)
+            await show_post_action_menu(update, context, chat.id, lang)
+
         if session.get("pending_action") is None:
             session["mode"] = None
 
@@ -926,6 +1179,51 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Image received. Send more or type /done.")
 
 
+async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    session = get_session(user.id, user.username)
+    lang = session["language"]
+    doc = update.message.document
+
+    if session.get("mode") != "word_to_audio":
+        await update.message.reply_text(
+            tt("Please select 'Word File to Audio' from the menu first, then send the .docx file.", lang)
+        )
+        return
+
+    if not DOCX_AVAILABLE:
+        await update.message.reply_text(
+            tt("Word to Audio feature is currently unavailable on this server.", lang)
+        )
+        session["mode"] = None
+        return
+
+    tmp_dir = tempfile.mkdtemp()
+    local_path = os.path.join(tmp_dir, doc.file_name)
+    tg_file = await doc.get_file()
+    await tg_file.download_to_drive(local_path)
+
+    try:
+        d = python_docx.Document(local_path)
+        full_text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
+        if not full_text.strip():
+            await update.message.reply_text(t("no_text_found", lang))
+            session["mode"] = None
+            return
+        out_dir = tempfile.mkdtemp()
+        chunks = [full_text[i:i + 4000] for i in range(0, len(full_text), 4000)]
+        for idx, chunk in enumerate(chunks):
+            mp3_path = os.path.join(out_dir, f"{FILE_PREFIX}_audio_{idx+1}.mp3")
+            gTTS(text=chunk, lang="en").save(mp3_path)
+            await update.message.reply_audio(audio=open(mp3_path, "rb"))
+    except Exception as e:
+        logger.exception("Error in word_to_audio")
+        log_error(user.id, str(e))
+        await update.message.reply_text(tt(f"An error occurred: {e}", lang))
+    finally:
+        session["mode"] = None
+
+
 async def handle_account_flow(update, context, text):
     user = update.effective_user
     session = get_session(user.id, user.username)
@@ -1002,6 +1300,52 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_account_flow(update, context, text)
         return
 
+    if session.get("feature_request_step"):
+        session.pop("feature_request_step", None)
+        session["mode"] = None
+        counter_doc = fb_get("counters", "feature_requests") or {"count": 0}
+        new_count = counter_doc.get("count", 0) + 1
+        fb_set("counters", "feature_requests", {"count": new_count})
+        request_number = f"FR-{new_count}"
+        fb_set(
+            "feature_requests",
+            request_number,
+            {
+                "request_number": request_number,
+                "user_id": user.id,
+                "username": user.username,
+                "text": text,
+                "created_at": ist_now().isoformat(),
+            },
+        )
+        if ADMIN_STATE["admin_id"] is not None:
+            try:
+                await context.bot.send_message(
+                    ADMIN_STATE["admin_id"],
+                    f"New feature request {request_number}.\nUser: @{user.username} (ID: {user.id})\n\n{text}",
+                )
+            except Exception:
+                pass
+        await update.message.reply_text(
+            tt(f"Your request {request_number} has been sent to the admin. Thank you!", lang)
+        )
+        return
+
+    if session.get("mode") == "text_to_audio":
+        session["mode"] = None
+        try:
+            out_dir = tempfile.mkdtemp()
+            chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+            for idx, chunk in enumerate(chunks):
+                mp3_path = os.path.join(out_dir, f"{FILE_PREFIX}_audio_{idx+1}.mp3")
+                gTTS(text=chunk, lang="en").save(mp3_path)
+                await update.message.reply_audio(audio=open(mp3_path, "rb"))
+        except Exception as e:
+            logger.exception("Error in text_to_audio")
+            log_error(user.id, str(e))
+            await update.message.reply_text(tt(f"An error occurred: {e}", lang))
+        return
+
     if user.id in PENDING_RATING and session.get("awaiting_rating_reason"):
         session["awaiting_rating_reason"] = False
         pending = PENDING_RATING.pop(user.id, None)
@@ -1057,7 +1401,7 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 page_numbers = None
             else:
                 page_numbers = parse_page_ranges(text, max_pages)
-            extracted = extract_text_with_ocr_fallback(path, page_numbers)
+            extracted = extract_text_with_ocr_fallback(path, page_numbers, label_pages=True, lang=lang)
             if not extracted.strip():
                 await update.message.reply_text(t("no_text_found", lang))
                 session["mode"] = None
@@ -1065,6 +1409,25 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["pending_text_result"] = extracted
             session["pending_action"] = "choose_text_output"
             await update.message.reply_text(t("text_output_choice", lang), reply_markup=TEXT_OUTPUT_MENU)
+            return
+
+        elif pending == "pdf_search":
+            reader = PdfReader(path)
+            search_term = text.strip().lower()
+            matching_pages = []
+            with pdfplumber.open(path) as pdf:
+                for i, page in enumerate(pdf.pages, start=1):
+                    page_text = page.extract_text() or ""
+                    if search_term in page_text.lower():
+                        matching_pages.append(i)
+            if matching_pages:
+                pages_str = ", ".join(str(p) for p in matching_pages)
+                msg = tt(f"\"{text.strip()}\" was found on page(s): {pages_str}", lang)
+            else:
+                msg = tt(f"\"{text.strip()}\" was not found in this PDF.", lang)
+            await update.message.reply_text(msg)
+            await show_post_action_menu(update, context, chat_id, lang)
+            session["mode"] = None
             return
 
         elif pending == "extract":
@@ -1255,18 +1618,27 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def whatsnew(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        f"Current version: {VERSION_NAME}\n"
-        f"Released: {VERSION_RELEASE_ISO}\n\n"
+    user = update.effective_user
+    session = get_session(user.id, user.username)
+    lang = session["language"]
+    body = (
         "What's new in this version:\n"
-        "- Full multi-language support (English, Hindi, Marathi)\n"
-        "- User Accounts with Authorization Token\n"
-        "- Improved, more reliable session tracking\n"
-        "- Rate your experience after each session\n"
-        "- Choice of text file or chat message for extracted text\n"
-        "- Page-range selection for text extraction\n"
-        "- Continue using the same PDF for multiple actions without re-uploading\n"
+        "- Automatic translation for all languages, including new Odia support\n"
+        "- Clearer rating buttons that work well with screen readers\n"
+        "- Admin can now clear session or user data from the database\n"
+        "- Extracted text now shows clear page numbers\n"
+        "- New: PDF to Excel (extract tables)\n"
+        "- New: PDF to Word (Beta, up to 50 pages)\n"
+        "- New: Search for a word inside a PDF\n"
+        "- New: Word (.docx) file to Audio\n"
+        "- New: Text to Audio\n"
+        "- New: PDF Info (page count, word count, reading time)\n"
+        "- New: Request a Feature from the My Account menu\n"
+        "- Admin sessions no longer time out\n"
+        "- Returning users are now greeted by name\n"
     )
+    header = f"Current version: {VERSION_NAME}\nReleased: {VERSION_RELEASE_ISO}\n\n"
+    text = header + tt(body, lang) if lang != "en" else header + body
     await update.message.reply_text(text)
 
 
@@ -1309,6 +1681,23 @@ ADMIN_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Delete User Account", callback_data="admin_deleteuser")],
         [InlineKeyboardButton("Message a Specific User", callback_data="admin_msguser")],
         [InlineKeyboardButton("Most Used Feature", callback_data="admin_mostused")],
+        [InlineKeyboardButton("Clear Database", callback_data="admin_cleardb")],
+    ]
+)
+
+CLEAR_DB_MENU = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("Clear Sessions only", callback_data="cleardb_sessions")],
+        [InlineKeyboardButton("Clear Users only", callback_data="cleardb_users")],
+        [InlineKeyboardButton("Clear Both", callback_data="cleardb_both")],
+        [InlineKeyboardButton("Cancel", callback_data="cleardb_cancel")],
+    ]
+)
+
+CLEAR_DB_CONFIRM_MENU = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("Yes, I am sure - delete it", callback_data="cleardb_confirm")],
+        [InlineKeyboardButton("Cancel", callback_data="cleardb_cancel")],
     ]
 )
 
@@ -1528,6 +1917,12 @@ async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["admin_step"] = "awaiting_msguser_id"
         await query.edit_message_text("Type the Telegram ID of the user you want to message:")
 
+    elif data == "admin_cleardb":
+        await query.edit_message_text(
+            "Choose what to clear from the database. This cannot be undone:",
+            reply_markup=CLEAR_DB_MENU,
+        )
+
     elif data == "admin_mostused":
         if not FIREBASE_AVAILABLE:
             await query.edit_message_text("Database unavailable.", reply_markup=ADMIN_MENU)
@@ -1558,6 +1953,63 @@ async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Could not compute stats: {e}", reply_markup=ADMIN_MENU)
 
 
+async def clear_db_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    session = get_session(user.id, user.username)
+
+    if user.id != ADMIN_STATE["admin_id"]:
+        await query.edit_message_text("Access denied.")
+        return
+
+    data = query.data
+
+    if data == "cleardb_cancel":
+        session.pop("admin_cleardb_target", None)
+        await query.edit_message_text("Cancelled.", reply_markup=ADMIN_MENU)
+        return
+
+    if data == "cleardb_confirm":
+        target = session.pop("admin_cleardb_target", None)
+        if not target or not FIREBASE_AVAILABLE:
+            await query.edit_message_text("Nothing to clear, or database unavailable.", reply_markup=ADMIN_MENU)
+            return
+        try:
+            deleted_counts = {}
+            collections_to_clear = []
+            if target in ("sessions", "both"):
+                collections_to_clear.append("sessions")
+            if target in ("users", "both"):
+                collections_to_clear.append("users")
+            for coll in collections_to_clear:
+                docs = db.collection(coll).stream()
+                count = 0
+                for d in docs:
+                    d.reference.delete()
+                    count += 1
+                deleted_counts[coll] = count
+            summary = "\n".join(f"{k}: {v} deleted" for k, v in deleted_counts.items())
+            await query.edit_message_text(f"Database cleared.\n{summary}", reply_markup=ADMIN_MENU)
+        except Exception as e:
+            await query.edit_message_text(f"Could not clear database: {e}", reply_markup=ADMIN_MENU)
+        return
+
+    target_map = {
+        "cleardb_sessions": "sessions",
+        "cleardb_users": "users",
+        "cleardb_both": "both",
+    }
+    target = target_map.get(data)
+    if not target:
+        return
+    session["admin_cleardb_target"] = target
+    await query.edit_message_text(
+        f"Are you sure you want to clear: {target}? This cannot be undone.",
+        reply_markup=CLEAR_DB_CONFIRM_MENU,
+    )
+
+
 def main():
     global telegram_app
 
@@ -1574,11 +2026,13 @@ def main():
     app.add_handler(CallbackQueryHandler(lang_choice, pattern="^lang_"))
     app.add_handler(CallbackQueryHandler(category_choice, pattern="^cat_"))
     app.add_handler(CallbackQueryHandler(admin_menu_choice, pattern="^admin_"))
+    app.add_handler(CallbackQueryHandler(clear_db_choice, pattern="^cleardb_"))
     app.add_handler(CallbackQueryHandler(rating_choice, pattern="^rate_"))
     app.add_handler(CallbackQueryHandler(text_output_choice, pattern="^textout_"))
     app.add_handler(CallbackQueryHandler(mode_choice, pattern="^mode_"))
     app.add_handler(CallbackQueryHandler(op_choice, pattern="^op_"))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("docx"), handle_docx_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_reply))
 
