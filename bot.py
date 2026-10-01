@@ -102,24 +102,103 @@ FILE_PREFIX = "BlindIndianTechSupport"
 SUPPORT_EMAIL = "bits.headquarter505@gmail.com"
 SUPPORT_IMAGE_PATH = "support.jpg"
 
-VERSION_NAME = "Blind Indian Tech Support 2.2 - 3.3.2.5 Major Super Upgrade - Gel Core Upgrade"
-VERSION_RELEASE_ISO = "2026-10-01T00:00:00"
+VERSION_NAME = "Blind Indian Tech Support 2.3.2.4.7 - Super Generative Brain Core - Major Super Upgrade"
+VERSION_RELEASE_ISO = "2026-10-03T00:00:00"
+
+# The bot's very first successful live deployment date. Used to show a
+# dynamically-computed "Online since" status, so we never have to manually
+# update this text again in any future version.
+BOT_LIVE_SINCE_ISO = "2026-09-27T00:00:00"
 
 SESSION_TIMEOUT_SECONDS = 120
 PDF_TO_WORD_MAX_PAGES = 50
 IST = pytz.timezone("Asia/Kolkata")
 
+
+def bot_online_since_text(lang):
+    try:
+        since_dt = IST.localize(datetime.datetime.fromisoformat(BOT_LIVE_SINCE_ISO))
+        now = ist_now()
+        days_online = max(0, (now - since_dt).days)
+        date_str = since_dt.strftime("%d %B %Y")
+        text = f"Online since {date_str} ({days_online} days)"
+        return tr(text, lang) if lang not in ("en",) else text
+    except Exception:
+        return ""
+
+
 # Language codes as used by deep-translator (Google Translate codes).
-# Odia's Google Translate code is "or"; if that ever stops working we
-# automatically retry with the full language name "odia" below.
+# These are verified against deep-translator's own supported-languages list
+# at startup (see verify_language_codes below), and auto-corrected if Google
+# ever changes a code - so a single renamed code can never break a language.
 TRANSLATE_LANG_CODES = {
     "hi": "hi",
     "mr": "mr",
     "or": "or",
+    "ur": "ur",
+    "bn": "bn",
+    "gu": "gu",
+    "pa": "pa",
+    "ta": "ta",
+    "te": "te",
+    "kn": "kn",
+    "ml": "ml",
+    "as": "as",
+    "sd": "sd",
+    "gom": "gom",
+    "ne": "ne",
 }
-TRANSLATE_LANG_CODE_FALLBACKS = {
+
+# Languages that rely only on our own dictionary + community /suggest
+# submissions, and never on live Google Translate (because live translation
+# for them has proven unreliable).
+DICTIONARY_ONLY_LANGUAGES = {"or"}
+
+LANGUAGE_FULL_NAMES = {
+    "hi": "hindi",
+    "mr": "marathi",
     "or": "odia",
+    "ur": "urdu",
+    "bn": "bengali",
+    "gu": "gujarati",
+    "pa": "punjabi",
+    "ta": "tamil",
+    "te": "telugu",
+    "kn": "kannada",
+    "ml": "malayalam",
+    "as": "assamese",
+    "sd": "sindhi",
+    "gom": "konkani",
+    "ne": "nepali",
 }
+
+
+def verify_language_codes():
+    """Runs once at startup. Cross-checks our hardcoded language codes
+    against deep-translator's own live list of supported languages, and
+    silently self-corrects any code that Google has changed, by looking the
+    language up by its full name instead. Never crashes the bot - any
+    language that cannot be verified simply falls back to dictionary-only
+    mode."""
+    if not TRANSLATOR_AVAILABLE:
+        return
+    try:
+        supported = GoogleTranslator().get_supported_languages(as_dict=True)
+    except Exception:
+        logger.warning("Could not fetch supported languages list; skipping verification.")
+        return
+
+    for lang_key, code in list(TRANSLATE_LANG_CODES.items()):
+        if code in supported.values():
+            continue
+        full_name = LANGUAGE_FULL_NAMES.get(lang_key)
+        corrected = supported.get(full_name) if full_name else None
+        if corrected:
+            logger.warning(f"Language code for '{lang_key}' corrected from '{code}' to '{corrected}'.")
+            TRANSLATE_LANG_CODES[lang_key] = corrected
+        else:
+            logger.warning(f"Could not verify language code for '{lang_key}'; switching to dictionary-only mode.")
+            DICTIONARY_ONLY_LANGUAGES.add(lang_key)
 
 TRANSLATION_CACHE = {}  # in-memory cache: (lang, text) -> translated text
 
@@ -133,7 +212,14 @@ def _translate_line(line, lang):
     """Translate a single short line of text, with in-memory + Firestore
     caching and a safe fallback to the original English line if anything
     goes wrong. Translating line-by-line (instead of a whole paragraph at
-    once) is far more reliable with Google Translate."""
+    once) is far more reliable with Google Translate.
+
+    For dictionary-only languages (e.g. Odia), live Google Translate is
+    skipped entirely - only our own dictionary and community /suggest
+    submissions (both stored in the same translation_cache collection) are
+    used. If nothing is found, the original English line is returned along
+    with a note that the language is still under testing (handled by the
+    caller, not here)."""
     if not line.strip():
         return line
 
@@ -147,6 +233,10 @@ def _translate_line(line, lang):
         TRANSLATION_CACHE[mem_key] = cached["translated"]
         return cached["translated"]
 
+    if lang in DICTIONARY_ONLY_LANGUAGES:
+        # No dictionary entry and no community suggestion yet for this line.
+        return line
+
     if not TRANSLATOR_AVAILABLE:
         return line
 
@@ -158,12 +248,7 @@ def _translate_line(line, lang):
     try:
         translated = GoogleTranslator(source="en", target=target).translate(line)
     except Exception:
-        fallback_target = TRANSLATE_LANG_CODE_FALLBACKS.get(lang)
-        if fallback_target:
-            try:
-                translated = GoogleTranslator(source="en", target=fallback_target).translate(line)
-            except Exception:
-                translated = None
+        translated = None
 
     if not translated or not translated.strip():
         logger.warning(f"Translation failed for line, falling back to English: {line[:50]}")
@@ -292,11 +377,12 @@ WELCOME_MESSAGES = {
         "Welcome to the Blind Indian Tech Support PDF Manipulation Toolbox. "
         "Our best tool of 2026. Specially designed for visually impaired individuals. "
         "Release date: September 22, 2026. All rights reserved (c) Blind Indian Tech Support Team, "
-        "2026 and beyond. Developed and hosted by Blind Indian Tech Support. This bot has been online "
-        "since September 22, 2026. A heartfelt thank you to all our testers and users who used this "
+        "2026 and beyond. Developed and hosted by Blind Indian Tech Support. {online_status}. "
+        "A heartfelt thank you to all our testers and users who used this "
         "service and provided valuable feedback. We will continue to add more updates in the future, "
         "and we promise to never collect or store your files anywhere. Once again, a heartfelt thank "
         "you to everyone who used and tested this tool.\n\n"
+        "Made in Mumbai, India 🇮🇳 - by Blind Indian Tech Support.\n\n"
         "Please note: our server may sometimes take 30 to 60 seconds to respond to your very first "
         "message after a period of inactivity. After that, it will respond quickly."
     ),
@@ -304,10 +390,11 @@ WELCOME_MESSAGES = {
         "ब्लाइंड इंडियन टेक सपोर्ट पीडीएफ मैनिपुलेशन टूलबॉक्स में आपका स्वागत है। यह 2026 का हमारा सबसे बेहतरीन टूल है, "
         "जो विशेष रूप से दृष्टिबाधित लोगों के लिए बनाया गया है। रिलीज़ की तारीख: 22 सितंबर, 2026। सर्वाधिकार सुरक्षित, "
         "ब्लाइंड इंडियन टेक सपोर्ट टीम, 2026 और आगे। इसे ब्लाइंड इंडियन टेक सपोर्ट द्वारा बनाया और होस्ट किया गया है। "
-        "यह बॉट 22 सितंबर, 2026 से ऑनलाइन है। हमारे उन सभी परीक्षकों और उपयोगकर्ताओं का दिल से धन्यवाद, जिन्होंने इस सेवा "
+        "{online_status}। हमारे उन सभी परीक्षकों और उपयोगकर्ताओं का दिल से धन्यवाद, जिन्होंने इस सेवा "
         "का इस्तेमाल किया और महत्वपूर्ण प्रतिक्रिया दी। हम भविष्य में और भी अपडेट जोड़ते रहेंगे, और हम वादा करते हैं कि "
         "आपकी कोई भी फाइल कभी भी सुरक्षित या संग्रहीत नहीं की जाएगी। एक बार फिर, इस टूल का इस्तेमाल और परीक्षण करने वाले "
         "सभी लोगों का दिल से धन्यवाद।\n\n"
+        "मुंबई, भारत 🇮🇳 में निर्मित - ब्लाइंड इंडियन टेक सपोर्ट द्वारा।\n\n"
         "कृपया ध्यान दें: कुछ समय तक इस्तेमाल न होने के बाद, आपके पहले मैसेज का जवाब आने में कभी-कभी 30 से 60 सेकंड का "
         "समय लग सकता है। उसके बाद बॉट तेज़ी से जवाब देगा।"
     ),
@@ -315,9 +402,10 @@ WELCOME_MESSAGES = {
         "ब्लाइंड इंडियन टेक सपोर्ट पीडीएफ मॅनिप्युलेशन टूलबॉक्समध्ये आपले स्वागत आहे. हे 2026 सालातील आमचे सर्वोत्तम टूल आहे, "
         "जे खास दृष्टिबाधित व्यक्तींसाठी तयार करण्यात आले आहे. प्रकाशन तारीख: 22 सप्टेंबर, 2026. सर्व हक्क राखीव, "
         "ब्लाइंड इंडियन टेक सपोर्ट टीम, 2026 आणि पुढे. हे ब्लाइंड इंडियन टेक सपोर्टने विकसित आणि होस्ट केले आहे. "
-        "हा बॉट 22 सप्टेंबर, 2026 पासून ऑनलाइन आहे. या सेवेचा वापर करून मौल्यवान अभिप्राय देणाऱ्या आमच्या सर्व परीक्षकांचे "
+        "{online_status}. या सेवेचा वापर करून मौल्यवान अभिप्राय देणाऱ्या आमच्या सर्व परीक्षकांचे "
         "आणि वापरकर्त्यांचे मनापासून आभार. आम्ही भविष्यातही अधिक अपडेट्स जोडत राहू, आणि आम्ही वचन देतो की तुमची कोणतीही "
         "फाइल आम्ही कधीही साठवणार किंवा जतन करणार नाही. पुन्हा एकदा, हे टूल वापरणाऱ्या आणि तपासणाऱ्या सर्वांचे मनापासून आभार.\n\n"
+        "मुंबई, भारत 🇮🇳 मध्ये निर्मित - ब्लाइंड इंडियन टेक सपोर्ट द्वारा.\n\n"
         "कृपया लक्षात घ्या: काही वेळ वापर न झाल्यास, तुमच्या पहिल्या मेसेजला उत्तर येण्यास कधीकधी 30 ते 60 सेकंद लागू "
         "शकतात. त्यानंतर बॉट लवकर उत्तर देईल."
     ),
@@ -332,6 +420,13 @@ ODIA_DISCLAIMER_EN = (
     "Notice: Odia language support is currently under testing. Some translations may contain "
     "errors. Odia translation provided by Blind Indian Tech Support."
 )
+
+def get_welcome_message(lang):
+    if lang in WELCOME_MESSAGES:
+        return WELCOME_MESSAGES[lang].format(online_status=bot_online_since_text(lang))
+    template = WELCOME_MESSAGES["en"].format(online_status=bot_online_since_text("en"))
+    return tr(template, lang)
+
 
 NAME_GREETING = {
     "en": "Hello {name}!",
@@ -632,11 +727,29 @@ async def finalize_session(user_id, s):
 
 LANG_MENU = InlineKeyboardMarkup(
     [
-        [InlineKeyboardButton("हिन्दी (भारत)", callback_data="lang_hi")],
-        [InlineKeyboardButton("English (UK)", callback_data="lang_en")],
-        [InlineKeyboardButton("मराठी (भारत)", callback_data="lang_mr")],
-        [InlineKeyboardButton("ଓଡ଼ିଆ (India)", callback_data="lang_or")],
+        [InlineKeyboardButton("🇮🇳 हिन्दी (भारत)", callback_data="lang_hi")],
+        [InlineKeyboardButton("🇮🇳 English (India)", callback_data="lang_en")],
+        [InlineKeyboardButton("🇮🇳 मराठी (भारत)", callback_data="lang_mr")],
+        [InlineKeyboardButton("🇮🇳 ଓଡ଼ିଆ (ଭାରତ)", callback_data="lang_or")],
+        [InlineKeyboardButton("🇵🇰 اردو (پاکستان)", callback_data="lang_ur")],
+        [InlineKeyboardButton("🇮🇳 বাংলা (ভারত)", callback_data="lang_bn")],
+        [InlineKeyboardButton("🇮🇳 ગુજરાતી (ભારત)", callback_data="lang_gu")],
+        [InlineKeyboardButton("🇮🇳 ਪੰਜਾਬੀ (ਭਾਰਤ)", callback_data="lang_pa")],
+        [InlineKeyboardButton("🇮🇳 தமிழ் (இந்தியா)", callback_data="lang_ta")],
+        [InlineKeyboardButton("🇮🇳 తెలుగు (భారత్)", callback_data="lang_te")],
+        [InlineKeyboardButton("🇮🇳 ಕನ್ನಡ (ಭಾರತ)", callback_data="lang_kn")],
+        [InlineKeyboardButton("🇮🇳 മലയാളം (ഇന്ത്യ)", callback_data="lang_ml")],
+        [InlineKeyboardButton("🇮🇳 অসমীয়া (ভাৰত)", callback_data="lang_as")],
+        [InlineKeyboardButton("🇵🇰 سنڌي (پاکستان)", callback_data="lang_sd")],
+        [InlineKeyboardButton("🇮🇳 कोंकणी (भारत)", callback_data="lang_gom")],
+        [InlineKeyboardButton("🇳🇵 नेपाली (नेपाल)", callback_data="lang_ne")],
     ]
+)
+
+SUGGEST_LANG_MENU = InlineKeyboardMarkup(
+    [[InlineKeyboardButton(btn.text, callback_data="sugglang_" + btn.callback_data.replace("lang_", ""))]
+     for row in LANG_MENU.inline_keyboard for btn in row
+     if btn.callback_data != "lang_en"]
 )
 
 CATEGORY_MENU = InlineKeyboardMarkup(
@@ -765,7 +878,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 greeting = f"Hello {account['name']}!"
             await update.message.reply_text(greeting)
 
-    await update.message.reply_text(WELCOME_MESSAGES.get(lang, WELCOME_MESSAGES["en"]) if lang in WELCOME_MESSAGES else tt(WELCOME_MESSAGES["en"], lang))
+    await update.message.reply_text(get_welcome_message(lang))
     await update.message.reply_text("Please select your preferred language:", reply_markup=LANG_MENU)
 
 
@@ -780,13 +893,95 @@ async def lang_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lang_code == "mr":
         await context.bot.send_message(query.message.chat.id, MARATHI_DISCLAIMER)
-    elif lang_code == "or":
-        await context.bot.send_message(query.message.chat.id, tr(ODIA_DISCLAIMER_EN, "or"))
+    elif lang_code in DICTIONARY_ONLY_LANGUAGES:
+        await context.bot.send_message(
+            query.message.chat.id,
+            tt(
+                "Notice: this language is still under testing and relies on our own "
+                "dictionary. Some words may appear in English until our community helps "
+                "translate them using /suggest. Dictionary provider: Blind Indian Tech Support Dictionary.",
+                lang_code,
+            ),
+        )
+
+    await context.bot.send_message(query.message.chat.id, get_welcome_message(lang_code))
 
     await query.edit_message_text(
         t("category_prompt", lang_code),
         reply_markup=CATEGORY_MENU,
     )
+
+
+async def suggest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    session = get_session(user.id, user.username)
+    lang = session["language"]
+    await update.message.reply_text(
+        tt("Which language would you like to suggest a translation for?", lang),
+        reply_markup=SUGGEST_LANG_MENU,
+    )
+
+
+async def suggest_lang_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    session = get_session(user_id, query.from_user.username)
+    lang = session["language"]
+    suggest_lang = query.data.replace("sugglang_", "")
+    session["suggest_lang"] = suggest_lang
+    session["suggest_step"] = "awaiting_english"
+    await query.edit_message_text(
+        tt(
+            "Please paste the exact English line that appeared incorrectly or in English "
+            "(copy it exactly as the bot showed it to you):",
+            lang,
+        )
+    )
+
+
+async def handle_suggest_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
+    user = update.effective_user
+    session = get_session(user.id, user.username)
+    lang = session["language"]
+    step = session.get("suggest_step")
+
+    if step == "awaiting_english":
+        session["suggest_english"] = text.strip()
+        session["suggest_step"] = "awaiting_translation"
+        await update.message.reply_text(
+            tt("Thank you. Now please type the correct translation for that line:", lang)
+        )
+        return
+
+    if step == "awaiting_translation":
+        suggest_lang = session.pop("suggest_lang", None)
+        english_text = session.pop("suggest_english", None)
+        session.pop("suggest_step", None)
+        translation = text.strip()
+
+        if not suggest_lang or not english_text:
+            await update.message.reply_text(tt("Something went wrong. Please try /suggest again.", lang))
+            return
+
+        cache_doc_id = _cache_key(english_text, suggest_lang)
+        fb_set(
+            "translation_cache",
+            cache_doc_id,
+            {
+                "lang": suggest_lang,
+                "original": english_text,
+                "translated": translation,
+                "source": "community",
+                "suggested_by": user.id,
+            },
+        )
+        TRANSLATION_CACHE[(suggest_lang, english_text)] = translation
+
+        await update.message.reply_text(
+            tt("Thank you for your suggestion! It will now be used for everyone using this language.", lang)
+        )
+        return
 
 
 async def category_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1232,7 +1427,13 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
             await context.bot.send_message(chat.id, tt("Generating AI summary, please wait...", lang))
             try:
                 genai.configure(api_key=raw_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                available_models = [
+                    m.name for m in genai.list_models()
+                    if "generateContent" in m.supported_generation_methods
+                ]
+                preferred = [m for m in available_models if "flash" in m.lower()]
+                model_name = (preferred or available_models)[0]
+                model = genai.GenerativeModel(model_name)
                 prompt = (
                     "Summarize the following document text in clear, simple language, "
                     "in about 150-250 words:\n\n" + pdf_text[:15000]
@@ -1460,6 +1661,10 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "admin_step" in session:
         await handle_admin_flow(update, context, text)
+        return
+
+    if "suggest_step" in session:
+        await handle_suggest_flow(update, context, text)
         return
 
     if "feedback_step" in session:
@@ -1800,30 +2005,36 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 WHATSNEW_BODY = {
     "en": (
         "What's new in this version:\n"
-        "- Reliable line-by-line translation for every language\n"
-        "- Faster translations using a saved translation cache\n"
-        "- New: AI Summary powered by your own Gemini API key\n"
-        "- PDF to Word conversion (Beta, up to 50 pages)\n"
-        "- Admin gets a special welcome and a verified admin badge\n"
-        "- Deleting a user account now asks for a reason and notifies the user\n"
+        "- 12 new languages added: Urdu, Bengali, Gujarati, Punjabi, Tamil, Telugu, "
+        "Kannada, Malayalam, Assamese, Sindhi, Konkani, Nepali\n"
+        "- Language codes now self-verify and self-correct automatically\n"
+        "- New: /suggest command - help us improve translations in any language\n"
+        "- A full welcome message is now shown again after you pick your language\n"
+        "- The welcome message now shows how long the bot has been online\n"
+        "- Gemini model selection fixed automatically for AI Summary\n"
+        "- Admin can now also clear the translation cache\n"
     ),
     "hi": (
         "इस वर्शन में नया क्या है:\n"
-        "- अब हर भाषा में भरोसेमंद, लाइन-दर-लाइन अनुवाद\n"
-        "- अनुवाद कैश की वजह से जवाब अब तेज़ आएंगे\n"
-        "- नया: आपकी अपनी Gemini API कुंजी से AI Summary फीचर\n"
-        "- PDF से Word रूपांतरण (बीटा, 50 पेज तक)\n"
-        "- एडमिन को खास वेलकम मैसेज और वेरिफाइड बैज मिलेगा\n"
-        "- किसी यूज़र का अकाउंट डिलीट करने पर अब कारण पूछा जाएगा और यूज़र को सूचित किया जाएगा\n"
+        "- 12 नई भाषाएं जुड़ीं: उर्दू, बंगाली, गुजराती, पंजाबी, तमिल, तेलुगु, "
+        "कन्नड़, मलयालम, असमिया, सिंधी, कोंकणी, नेपाली\n"
+        "- भाषा कोड अब खुद जांचते और खुद सुधारते हैं\n"
+        "- नया: /suggest कमांड - किसी भी भाषा में अनुवाद सुधारने में हमारी मदद करें\n"
+        "- भाषा चुनने के बाद अब पूरा वेलकम मैसेज फिर से दिखेगा\n"
+        "- वेलकम मैसेज में अब दिखेगा कि बॉट कब से ऑनलाइन है\n"
+        "- AI Summary के लिए Gemini मॉडल चयन अब अपने आप ठीक होता है\n"
+        "- एडमिन अब Translation Cache भी साफ़ कर सकता है\n"
     ),
     "mr": (
         "या वर्शनमध्ये नवीन काय आहे:\n"
-        "- आता प्रत्येक भाषेत विश्वासार्ह, ओळीने-ओळ भाषांतर\n"
-        "- भाषांतर कॅशेमुळे उत्तरे आता जलद येतील\n"
-        "- नवीन: तुमच्या स्वतःच्या Gemini API की वापरून AI Summary फीचर\n"
-        "- PDF ते Word रूपांतरण (बीटा, 50 पानांपर्यंत)\n"
-        "- अॅडमिनला खास वेलकम मेसेज आणि व्हेरिफाइड बॅज मिळेल\n"
-        "- युजरचे खाते डिलीट करताना आता कारण विचारले जाईल आणि युजरला कळवले जाईल\n"
+        "- 12 नवीन भाषा जोडल्या: उर्दू, बंगाली, गुजराती, पंजाबी, तमिळ, तेलुगु, "
+        "कन्नड, मल्याळम, आसामी, सिंधी, कोकणी, नेपाळी\n"
+        "- भाषा कोड आता स्वतः तपासतात आणि स्वतः दुरुस्त होतात\n"
+        "- नवीन: /suggest कमांड - कोणत्याही भाषेतील भाषांतर सुधारण्यास मदत करा\n"
+        "- भाषा निवडल्यानंतर आता पूर्ण वेलकम मेसेज पुन्हा दिसेल\n"
+        "- वेलकम मेसेजमध्ये आता बॉट किती काळापासून ऑनलाइन आहे ते दिसेल\n"
+        "- AI Summary साठी Gemini मॉडेल निवड आता आपोआप दुरुस्त होते\n"
+        "- अॅडमिन आता Translation Cache देखील साफ करू शकतो\n"
     ),
 }
 
@@ -1897,6 +2108,7 @@ CLEAR_DB_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Clear Sessions only", callback_data="cleardb_sessions")],
         [InlineKeyboardButton("Clear Users only", callback_data="cleardb_users")],
         [InlineKeyboardButton("Clear Both", callback_data="cleardb_both")],
+        [InlineKeyboardButton("Clear Translation Cache", callback_data="cleardb_translations")],
         [InlineKeyboardButton("Cancel", callback_data="cleardb_cancel")],
     ]
 )
@@ -2211,6 +2423,8 @@ async def clear_db_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 collections_to_clear.append("sessions")
             if target in ("users", "both"):
                 collections_to_clear.append("users")
+            if target == "translations":
+                collections_to_clear.append("translation_cache")
             for coll in collections_to_clear:
                 docs = db.collection(coll).stream()
                 count = 0
@@ -2218,6 +2432,8 @@ async def clear_db_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     d.reference.delete()
                     count += 1
                 deleted_counts[coll] = count
+            if target == "translations":
+                TRANSLATION_CACHE.clear()
             summary = "\n".join(f"{k}: {v} deleted" for k, v in deleted_counts.items())
             await query.edit_message_text(f"Database cleared.\n{summary}", reply_markup=ADMIN_MENU)
         except Exception as e:
@@ -2228,6 +2444,7 @@ async def clear_db_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "cleardb_sessions": "sessions",
         "cleardb_users": "users",
         "cleardb_both": "both",
+        "cleardb_translations": "translations",
     }
     target = target_map.get(data)
     if not target:
@@ -2242,6 +2459,8 @@ async def clear_db_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     global telegram_app
 
+    verify_language_codes()
+
     app = Application.builder().token(BOT_TOKEN).build()
     telegram_app = app
 
@@ -2252,6 +2471,8 @@ def main():
     app.add_handler(CommandHandler("feedback", feedback_entry))
     app.add_handler(CommandHandler("admin", admin_entry))
     app.add_handler(CommandHandler("whatsnew", whatsnew))
+    app.add_handler(CommandHandler("suggest", suggest_command))
+    app.add_handler(CallbackQueryHandler(suggest_lang_choice, pattern="^sugglang_"))
     app.add_handler(CallbackQueryHandler(lang_choice, pattern="^lang_"))
     app.add_handler(CallbackQueryHandler(category_choice, pattern="^cat_"))
     app.add_handler(CallbackQueryHandler(admin_menu_choice, pattern="^admin_"))
