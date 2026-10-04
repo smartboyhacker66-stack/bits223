@@ -84,6 +84,12 @@ try:
 except ImportError:
     GEMINI_SDK_AVAILABLE = False
 
+try:
+    from groq import Groq
+    GROQ_SDK_AVAILABLE = True
+except ImportError:
+    GROQ_SDK_AVAILABLE = False
+
 import base64
 
 logging.basicConfig(
@@ -102,8 +108,8 @@ FILE_PREFIX = "BlindIndianTechSupport"
 SUPPORT_EMAIL = "bits.headquarter505@gmail.com"
 SUPPORT_IMAGE_PATH = "support.jpg"
 
-VERSION_NAME = "Blind Indian Tech Support 2.3.2.4.7 - Super Generative Brain Core - Major Super Upgrade"
-VERSION_RELEASE_ISO = "2026-10-03T00:00:00"
+VERSION_NAME = "Blind Indian Tech Support Brain Power Brain Generative AI Major Super Patch Fix Update 3.2.1.8920.337"
+VERSION_RELEASE_ISO = "2026-10-04T13:05:00"
 
 # The bot's very first successful live deployment date. Used to show a
 # dynamically-computed "Online since" status, so we never have to manually
@@ -149,10 +155,13 @@ TRANSLATE_LANG_CODES = {
     "ne": "ne",
 }
 
-# Languages that rely only on our own dictionary + community /suggest
-# submissions, and never on live Google Translate (because live translation
-# for them has proven unreliable).
-DICTIONARY_ONLY_LANGUAGES = {"or"}
+# Previously, languages in this set relied only on our own dictionary +
+# community /suggest submissions, because live translation for them had
+# proven unreliable. As of version 3.0, live translation for every
+# supported language is handled reliably by Blind Indian Tech Support AI
+# (see bits_ai_translate_line below), so this set is kept empty - no
+# language needs to be restricted to dictionary-only mode anymore.
+DICTIONARY_ONLY_LANGUAGES = set()
 
 LANGUAGE_FULL_NAMES = {
     "hi": "hindi",
@@ -211,15 +220,16 @@ def _cache_key(text, lang):
 def _translate_line(line, lang):
     """Translate a single short line of text, with in-memory + Firestore
     caching and a safe fallback to the original English line if anything
-    goes wrong. Translating line-by-line (instead of a whole paragraph at
-    once) is far more reliable with Google Translate.
+    goes wrong.
 
-    For dictionary-only languages (e.g. Odia), live Google Translate is
-    skipped entirely - only our own dictionary and community /suggest
-    submissions (both stored in the same translation_cache collection) are
-    used. If nothing is found, the original English line is returned along
-    with a note that the language is still under testing (handled by the
-    caller, not here)."""
+    As of version 3.0: the primary translator is Blind Indian Tech Support
+    AI (version 1.1), our own AI engine, which works reliably for every
+    supported language - there is no longer a dictionary-only restriction
+    for any language. The older Google-Translate-based path is kept only
+    as a secondary safety net, used only if Blind Indian Tech Support AI is
+    briefly unavailable. Community /suggest submissions are stored in the
+    same translation_cache collection and are always checked first, so a
+    human correction always wins over either AI engine."""
     if not line.strip():
         return line
 
@@ -233,22 +243,22 @@ def _translate_line(line, lang):
         TRANSLATION_CACHE[mem_key] = cached["translated"]
         return cached["translated"]
 
-    if lang in DICTIONARY_ONLY_LANGUAGES:
-        # No dictionary entry and no community suggestion yet for this line.
-        return line
-
-    if not TRANSLATOR_AVAILABLE:
-        return line
-
-    target = TRANSLATE_LANG_CODES.get(lang)
-    if not target:
-        return line
-
     translated = None
-    try:
-        translated = GoogleTranslator(source="en", target=target).translate(line)
-    except Exception:
-        translated = None
+
+    # Primary: Blind Indian Tech Support AI.
+    full_name = LANGUAGE_FULL_NAMES.get(lang)
+    if BITS_AI_AVAILABLE and full_name:
+        translated = bits_ai_translate_line(line, full_name)
+
+    # Fallback: the older Google-Translate-based path, only used if Blind
+    # Indian Tech Support AI did not return a usable translation.
+    if (not translated or not translated.strip()) and TRANSLATOR_AVAILABLE:
+        target = TRANSLATE_LANG_CODES.get(lang)
+        if target:
+            try:
+                translated = GoogleTranslator(source="en", target=target).translate(line)
+            except Exception:
+                translated = None
 
     if not translated or not translated.strip():
         logger.warning(f"Translation failed for line, falling back to English: {line[:50]}")
@@ -263,10 +273,13 @@ def tr(text, lang):
     """Translate an English string (which may have multiple lines) into the
     target language, line by line, so a problem with one line never breaks
     the rest of the message. Falls back silently to English wherever a
-    single line's translation is not possible."""
+    single line's translation is not possible.
+
+    As of version 3.0, this no longer requires deep-translator to be
+    available - Blind Indian Tech Support AI (our own engine) is the
+    primary translator, and deep-translator is only a secondary fallback
+    (see _translate_line)."""
     if not text or lang == "en":
-        return text
-    if not TRANSLATOR_AVAILABLE:
         return text
     lines = text.split("\n")
     translated_lines = [_translate_line(line, lang) for line in lines]
@@ -285,6 +298,75 @@ def decode_key(encoded_key):
         return base64.b64decode(encoded_key.encode("utf-8")).decode("utf-8")
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Blind Indian Tech Support AI (version 1.1) - the project's own AI engine,
+# introduced for the first time in version 3.0. Technically powered by
+# Groq, but this is never shown to users - it is presented only under our
+# own name, so this remains our own brand. It is the primary engine for
+# translating all non-English, non-hardcoded languages, and also powers
+# three new features in this release: Ask Your PDF, AI Summary Backup, and
+# Simplify Text.
+# ---------------------------------------------------------------------------
+BITS_AI_VERSION = "1.1"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+# Tried in this order. Keeping more than one means a single retired or
+# renamed model on Groq's side can never fully break this feature.
+GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+groq_client = None
+if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    except Exception as e:
+        logger.warning(f"Blind Indian Tech Support AI could not be initialized: {e}")
+        groq_client = None
+
+BITS_AI_AVAILABLE = groq_client is not None
+
+
+def bits_ai_chat(system_prompt, user_prompt, max_tokens=1024, temperature=0.3):
+    """Low-level helper that sends one request to Blind Indian Tech Support
+    AI and returns the plain text reply, or None if it could not get a
+    usable reply from any available model. Never raises - every caller can
+    safely treat a None return as 'this feature is temporarily unavailable'
+    and fall back accordingly."""
+    if not BITS_AI_AVAILABLE:
+        return None
+    for model_name in GROQ_MODELS:
+        try:
+            completion = groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            reply = completion.choices[0].message.content
+            if reply and reply.strip():
+                return reply.strip()
+        except Exception as e:
+            logger.warning(f"Blind Indian Tech Support AI model '{model_name}' failed: {e}")
+            continue
+    return None
+
+
+def bits_ai_translate_line(line, lang_full_name):
+    """Translates a single short line of English text into the target
+    language using Blind Indian Tech Support AI. Returns None on failure so
+    the caller can fall back safely to the older translation path."""
+    system_prompt = (
+        "You are a precise translation engine. Translate the user's English text into "
+        f"{lang_full_name}. Output ONLY the translated text, with no explanation, no quotes, "
+        "and no extra commentary. Keep any text inside {curly brackets} exactly as it is, "
+        "unchanged and untranslated. Keep any word starting with / exactly as it is, "
+        "unchanged. Keep emoji exactly as they are."
+    )
+    return bits_ai_chat(system_prompt, line, max_tokens=500, temperature=0.2)
 
 
 FUNNY_QUOTA_MESSAGE = {
@@ -796,6 +878,7 @@ TRANSFORM_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Rotate Pages", callback_data="mode_rotate")],
         [InlineKeyboardButton("PDF to Excel", callback_data="mode_pdf_to_excel")],
         [InlineKeyboardButton("PDF to Word (Beta)", callback_data="mode_pdf_to_word")],
+        [InlineKeyboardButton("Simplify Text", callback_data="mode_simplify_text")],
     ]
 )
 
@@ -812,6 +895,7 @@ INSPECT_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("View PDF Metadata", callback_data="mode_metadata")],
         [InlineKeyboardButton("Search a Word in PDF", callback_data="mode_pdf_search")],
         [InlineKeyboardButton("PDF Info (pages, words, time)", callback_data="mode_pdf_info")],
+        [InlineKeyboardButton("Ask Your PDF", callback_data="mode_ask_pdf")],
     ]
 )
 
@@ -843,7 +927,9 @@ SINGLE_FILE_OPS = InlineKeyboardMarkup(
         [InlineKeyboardButton("PDF to Word (Beta)", callback_data="op_pdf_to_word")],
         [InlineKeyboardButton("Search a Word", callback_data="op_pdf_search")],
         [InlineKeyboardButton("PDF Info", callback_data="op_pdf_info")],
-        [InlineKeyboardButton("AI Summary (Gemini)", callback_data="op_ai_summary")],
+        [InlineKeyboardButton("AI Summary", callback_data="op_ai_summary")],
+        [InlineKeyboardButton("Ask Your PDF", callback_data="op_ask_pdf")],
+        [InlineKeyboardButton("Simplify Text", callback_data="op_simplify_text")],
     ]
 )
 
@@ -1084,6 +1170,8 @@ async def mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         "pdf_search": "Send the PDF. Then tell me the word or phrase to search for.",
         "pdf_info": "Send the PDF to see its page count, word count, and estimated reading time.",
+        "ask_pdf": "Send the PDF. Then ask me your question about it, in plain language.",
+        "simplify_text": "Send the PDF you want simplified into easier, simpler language.",
     }
     await query.edit_message_text(tt(prompts.get(session["mode"], "Send the file."), lang))
     await notify_session_id(update, context, user_id)
@@ -1367,6 +1455,41 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
             session["pending_action"] = "pdf_search"
             await context.bot.send_message(chat.id, tt("What word or phrase should I search for?", lang))
 
+        elif mode == "ask_pdf":
+            session["pending_path"] = local_path
+            session["pending_action"] = "ask_pdf"
+            await context.bot.send_message(
+                chat.id, tt("What would you like to ask about this PDF?", lang)
+            )
+
+        elif mode == "simplify_text":
+            pdf_text = extract_text_with_ocr_fallback(local_path)
+            if not pdf_text.strip():
+                await context.bot.send_message(chat.id, t("no_text_found", lang))
+                return
+            await context.bot.send_message(chat.id, tt("Simplifying text, please wait...", lang))
+            simplified = bits_ai_chat(
+                "You rewrite documents in simple, easy-to-follow language, especially for "
+                "someone listening to the text rather than reading it. Keep all the original "
+                "information and meaning, but use short sentences and everyday words. Output "
+                "only the rewritten text, nothing else.",
+                pdf_text[:15000],
+                max_tokens=2000,
+                temperature=0.3,
+            )
+            if not simplified or not simplified.strip():
+                await context.bot.send_message(
+                    chat.id,
+                    tt("Sorry, I could not simplify this text right now. Please try again later.", lang),
+                )
+                await show_post_action_menu(update, context, chat.id, lang)
+                return
+            session["pending_text_result"] = simplified
+            session["pending_action"] = "choose_text_output"
+            await context.bot.send_message(
+                chat.id, t("text_output_choice", lang), reply_markup=TEXT_OUTPUT_MENU
+            )
+
         elif mode == "pdf_info":
             reader = PdfReader(local_path)
             num_pages = len(reader.pages)
@@ -1392,63 +1515,60 @@ async def run_single_file_mode(update, context, mode, local_path, query=None):
             await show_post_action_menu(update, context, chat.id, lang)
 
         elif mode == "ai_summary":
-            account = fb_get("users", str(user.id))
-            if not account:
-                await context.bot.send_message(
-                    chat.id, tt("Something went wrong. Please create an account first.", lang)
-                )
-                return
-            enc_key = account.get("gemini_key_enc")
-            if not enc_key:
-                await context.bot.send_message(
-                    chat.id,
-                    tt(
-                        "Please set your Gemini API key first from the My Account menu "
-                        "(Set Gemini API Key).",
-                        lang,
-                    ),
-                )
-                return
-            if not GEMINI_SDK_AVAILABLE:
-                await context.bot.send_message(
-                    chat.id, tt("AI Summary feature is currently unavailable on this server.", lang)
-                )
-                return
-            raw_key = decode_key(enc_key)
-            if not raw_key:
-                await context.bot.send_message(
-                    chat.id, tt("Your saved Gemini API key looks invalid. Please set it again.", lang)
-                )
-                return
             pdf_text = extract_text_with_ocr_fallback(local_path)
             if not pdf_text.strip():
                 await context.bot.send_message(chat.id, t("no_text_found", lang))
                 return
+
             await context.bot.send_message(chat.id, tt("Generating AI summary, please wait...", lang))
-            try:
-                genai.configure(api_key=raw_key)
-                available_models = [
-                    m.name for m in genai.list_models()
-                    if "generateContent" in m.supported_generation_methods
-                ]
-                preferred = [m for m in available_models if "flash" in m.lower()]
-                model_name = (preferred or available_models)[0]
-                model = genai.GenerativeModel(model_name)
-                prompt = (
-                    "Summarize the following document text in clear, simple language, "
-                    "in about 150-250 words:\n\n" + pdf_text[:15000]
+
+            summary_text = None
+
+            # Try the user's own Gemini key first, if they have set one.
+            account = fb_get("users", str(user.id))
+            enc_key = account.get("gemini_key_enc") if account else None
+            raw_key = decode_key(enc_key) if enc_key else None
+
+            if raw_key and GEMINI_SDK_AVAILABLE:
+                try:
+                    genai.configure(api_key=raw_key)
+                    available_models = [
+                        m.name for m in genai.list_models()
+                        if "generateContent" in m.supported_generation_methods
+                    ]
+                    preferred = [m for m in available_models if "flash" in m.lower()]
+                    model_name = (preferred or available_models)[0]
+                    model = genai.GenerativeModel(model_name)
+                    prompt = (
+                        "Summarize the following document text in clear, simple language, "
+                        "in about 150-250 words:\n\n" + pdf_text[:15000]
+                    )
+                    response = model.generate_content(prompt)
+                    summary_text = response.text if hasattr(response, "text") else str(response)
+                except Exception as e:
+                    logger.warning(f"Gemini AI Summary failed, trying backup engine: {e}")
+                    err_str = str(e).lower()
+                    if not ("quota" in err_str or "429" in err_str or "resource_exhausted" in err_str):
+                        log_error(user.id, str(e))
+                    summary_text = None
+
+            # Backup: if Gemini was not usable (no personal key set, briefly
+            # unavailable, or quota exhausted), Blind Indian Tech Support AI
+            # quietly takes over, so this feature is never fully down.
+            if not summary_text or not summary_text.strip():
+                summary_text = bits_ai_chat(
+                    "You summarize documents in clear, simple language, in about "
+                    "150-250 words. Output only the summary, nothing else.",
+                    pdf_text[:15000],
+                    max_tokens=500,
+                    temperature=0.3,
                 )
-                response = model.generate_content(prompt)
-                summary_text = response.text if hasattr(response, "text") else str(response)
+
+            if summary_text and summary_text.strip():
                 await context.bot.send_message(chat.id, tt("AI Summary:", lang) + "\n\n" + summary_text)
-            except Exception as e:
-                err_str = str(e).lower()
-                if "quota" in err_str or "429" in err_str or "resource_exhausted" in err_str:
-                    await context.bot.send_message(chat.id, funny_quota_message(lang))
-                else:
-                    logger.exception("Error in ai_summary")
-                    log_error(user.id, str(e))
-                    await context.bot.send_message(chat.id, tt(f"An error occurred: {e}", lang))
+            else:
+                await context.bot.send_message(chat.id, funny_quota_message(lang))
+
             await show_post_action_menu(update, context, chat.id, lang)
 
         if session.get("pending_action") is None:
@@ -1815,6 +1935,29 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session["mode"] = None
             return
 
+        elif pending == "ask_pdf":
+            pdf_text = extract_text_with_ocr_fallback(path)
+            if not pdf_text.strip():
+                await update.message.reply_text(t("no_text_found", lang))
+                session["mode"] = None
+                return
+            answer = bits_ai_chat(
+                "You answer questions about the document text the user provides. Only use "
+                "information found in the document. If the answer is not in the document, "
+                "say so clearly instead of guessing. Keep your answer concise.",
+                f"Document text:\n{pdf_text[:15000]}\n\nQuestion: {text.strip()}",
+                max_tokens=600,
+                temperature=0.2,
+            )
+            if not answer:
+                answer = tt(
+                    "Sorry, I could not answer that right now. Please try again later.", lang
+                )
+            await update.message.reply_text(tt("Answer:", lang) + "\n\n" + answer)
+            await show_post_action_menu(update, context, chat_id, lang)
+            session["mode"] = None
+            return
+
         elif pending == "extract":
             reader = PdfReader(path)
             pages = parse_page_ranges(text, len(reader.pages))
@@ -2005,36 +2148,34 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 WHATSNEW_BODY = {
     "en": (
         "What's new in this version:\n"
-        "- 12 new languages added: Urdu, Bengali, Gujarati, Punjabi, Tamil, Telugu, "
-        "Kannada, Malayalam, Assamese, Sindhi, Konkani, Nepali\n"
-        "- Language codes now self-verify and self-correct automatically\n"
-        "- New: /suggest command - help us improve translations in any language\n"
-        "- A full welcome message is now shown again after you pick your language\n"
-        "- The welcome message now shows how long the bot has been online\n"
-        "- Gemini model selection fixed automatically for AI Summary\n"
-        "- Admin can now also clear the translation cache\n"
+        "- Blind Indian Tech Support AI (version 1.1) introduced for the first time - our "
+        "own AI engine, now powering reliable translation for all 13 of our newer languages "
+        "(Odia, Urdu, Bengali, Gujarati, Punjabi, Tamil, Telugu, Kannada, Malayalam, "
+        "Assamese, Sindhi, Konkani, Nepali)\n"
+        "- New: Ask Your PDF - ask a PDF a question in plain language\n"
+        "- New: AI Summary Backup - if the primary AI Summary service is briefly "
+        "unavailable, Blind Indian Tech Support AI quietly takes over\n"
+        "- New: Simplify Text - rewrite complex PDF text in simpler language\n"
     ),
     "hi": (
         "इस वर्शन में नया क्या है:\n"
-        "- 12 नई भाषाएं जुड़ीं: उर्दू, बंगाली, गुजराती, पंजाबी, तमिल, तेलुगु, "
-        "कन्नड़, मलयालम, असमिया, सिंधी, कोंकणी, नेपाली\n"
-        "- भाषा कोड अब खुद जांचते और खुद सुधारते हैं\n"
-        "- नया: /suggest कमांड - किसी भी भाषा में अनुवाद सुधारने में हमारी मदद करें\n"
-        "- भाषा चुनने के बाद अब पूरा वेलकम मैसेज फिर से दिखेगा\n"
-        "- वेलकम मैसेज में अब दिखेगा कि बॉट कब से ऑनलाइन है\n"
-        "- AI Summary के लिए Gemini मॉडल चयन अब अपने आप ठीक होता है\n"
-        "- एडमिन अब Translation Cache भी साफ़ कर सकता है\n"
+        "- पहली बार Blind Indian Tech Support AI (वर्शन 1.1) शामिल किया गया - हमारा अपना AI "
+        "इंजन, जो अब हमारी 13 नई भाषाओं (ओड़िया, उर्दू, बंगाली, गुजराती, पंजाबी, तमिल, तेलुगु, "
+        "कन्नड़, मलयालम, असमिया, सिंधी, कोंकणी, नेपाली) का अनुवाद भरोसे के साथ करता है\n"
+        "- नया: Ask Your PDF - किसी PDF से आसान भाषा में सवाल पूछिए\n"
+        "- नया: AI Summary Backup - मुख्य AI Summary सेवा उपलब्ध न हो तो Blind Indian Tech "
+        "Support AI चुपचाप उसकी जगह ले लेता है\n"
+        "- नया: Simplify Text - मुश्किल PDF टेक्स्ट को आसान भाषा में फिर से लिखिए\n"
     ),
     "mr": (
         "या वर्शनमध्ये नवीन काय आहे:\n"
-        "- 12 नवीन भाषा जोडल्या: उर्दू, बंगाली, गुजराती, पंजाबी, तमिळ, तेलुगु, "
-        "कन्नड, मल्याळम, आसामी, सिंधी, कोकणी, नेपाळी\n"
-        "- भाषा कोड आता स्वतः तपासतात आणि स्वतः दुरुस्त होतात\n"
-        "- नवीन: /suggest कमांड - कोणत्याही भाषेतील भाषांतर सुधारण्यास मदत करा\n"
-        "- भाषा निवडल्यानंतर आता पूर्ण वेलकम मेसेज पुन्हा दिसेल\n"
-        "- वेलकम मेसेजमध्ये आता बॉट किती काळापासून ऑनलाइन आहे ते दिसेल\n"
-        "- AI Summary साठी Gemini मॉडेल निवड आता आपोआप दुरुस्त होते\n"
-        "- अॅडमिन आता Translation Cache देखील साफ करू शकतो\n"
+        "- प्रथमच Blind Indian Tech Support AI (वर्शन 1.1) समाविष्ट केले - आमचे स्वतःचे AI "
+        "इंजिन, जे आता आमच्या 13 नवीन भाषांचे (ओडिया, उर्दू, बंगाली, गुजराती, पंजाबी, तमिळ, "
+        "तेलुगु, कन्नड, मल्याळम, आसामी, सिंधी, कोकणी, नेपाळी) भाषांतर विश्वासार्हपणे करते\n"
+        "- नवीन: Ask Your PDF - कोणत्याही PDF ला सोप्या भाषेत प्रश्न विचारा\n"
+        "- नवीन: AI Summary Backup - मुख्य AI Summary सेवा उपलब्ध नसल्यास Blind Indian Tech "
+        "Support AI आपोआप त्याची जागा घेते\n"
+        "- नवीन: Simplify Text - कठीण PDF मजकूर सोप्या भाषेत पुन्हा लिहा\n"
     ),
 }
 
