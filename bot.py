@@ -108,8 +108,8 @@ FILE_PREFIX = "BlindIndianTechSupport"
 SUPPORT_EMAIL = "bits.headquarter505@gmail.com"
 SUPPORT_IMAGE_PATH = "support.jpg"
 
-VERSION_NAME = "Blind Indian Tech Support Brain Power Brain Generative AI Major Super Patch Fix Update 3.2.1.8920.337"
-VERSION_RELEASE_ISO = "2026-10-04T13:05:00"
+VERSION_NAME = "Blind Indian Tech Support Translation Engine Next Core Generation Update 3.2.5"
+VERSION_RELEASE_ISO = "2026-10-07T17:50:00"
 
 # The bot's very first successful live deployment date. Used to show a
 # dynamically-computed "Online since" status, so we never have to manually
@@ -211,25 +211,95 @@ def verify_language_codes():
 
 TRANSLATION_CACHE = {}  # in-memory cache: (lang, text) -> translated text
 
+# Tracks which (line, language) gaps have already been reported to the admin
+# in this process's lifetime, so we never send the same "please train this"
+# report twice in a row even before the Firestore write below is confirmed.
+REPORTED_MISSING_TRANSLATIONS = set()
+
+# Sent to the admin (never to end users) whenever a line is requested in a
+# language that has not been trained yet via the "Train Translation" admin
+# panel button. Deliberately light-hearted so a stream of these doesn't feel
+# like an alarm going off. Each one ends with a ready-to-copy template line.
+MISSING_TRANSLATION_TEMPLATES = [
+    "Boss, ek naya gap mil gaya! \U0001F573️ Main *{lang_name}* mein yeh line "
+    "translate nahi kar paaya kyunki aapne abhi tak sikhaya nahi:\n\n\"{line}\"\n\n"
+    "Jab tak sikhaoge nahi, main angrezi hi bolta rahunga jaise koi pakka NRI uncle. "
+    "\U0001F605\n\n(English) Boss, found a new gap! I couldn't translate this line into "
+    "{lang_name} because you haven't trained it yet. Until you do, I'll keep speaking "
+    "English like a proper NRI uncle.",
+
+    "Arre suno! Ek user ne *{lang_name}* mangi, aur main confuse ho gaya kyunki yeh line "
+    "meri dictionary mein hai hi nahi:\n\n\"{line}\"\n\nAbhi ke liye maine English thama "
+    "di hai, par yeh permanent solution nahi hai. \U0001F937\n\n(English) Hey! A user "
+    "asked for {lang_name}, and I drew a blank because this line isn't in my dictionary "
+    "yet. I handed them English for now, but that's not a real fix.",
+
+    "Breaking news: ek aur untrained line mil gayi! \U0001F4F0 *{lang_name}* ke liye yeh "
+    "line missing hai:\n\n\"{line}\"\n\nTab tak user English hi padhenge, jaise koi "
+    "half-subtitled movie. \U0001F3AC\n\n(English) Breaking news: another untrained line "
+    "found, missing for {lang_name}. Until then, users will keep reading English, like a "
+    "half-subtitled movie.",
+
+    "Admin ji, ek chhota sa SOS! \U0001F198 *{lang_name}* ke liye yeh line meri training "
+    "mein chhoot gayi:\n\n\"{line}\"\n\nMain koshish English se chala raha hoon, par "
+    "aapke bina yeh adhoora hi rahega. \U0001F64F\n\n(English) Admin ji, a small SOS! "
+    "This line got left out of my {lang_name} training. I'm limping along with English, "
+    "but it stays incomplete without you.",
+]
+
 
 def _cache_key(text, lang):
     digest = hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()
     return f"{lang}_{digest}"
 
 
-def _translate_line(line, lang):
-    """Translate a single short line of text, with in-memory + Firestore
-    caching and a safe fallback to the original English line if anything
-    goes wrong.
+def report_missing_translation(line, lang, cache_doc_id):
+    """Notifies the admin, once per (line, language), that a line has no
+    trained translation yet. Never raises - a failure here must never break
+    translation for the end user, who has already been shown the English
+    fallback by the time this is called."""
+    if ADMIN_STATE["admin_id"] is None:
+        return
+    if cache_doc_id in REPORTED_MISSING_TRANSLATIONS:
+        return
 
-    As of version 3.0: the primary translator is Blind Indian Tech Support
-    AI (version 1.1), our own AI engine, which works reliably for every
-    supported language - there is no longer a dictionary-only restriction
-    for any language. The older Google-Translate-based path is kept only
-    as a secondary safety net, used only if Blind Indian Tech Support AI is
-    briefly unavailable. Community /suggest submissions are stored in the
-    same translation_cache collection and are always checked first, so a
-    human correction always wins over either AI engine."""
+    try:
+        already_reported = fb_get("missing_translations", cache_doc_id)
+    except Exception:
+        already_reported = None
+    if already_reported:
+        REPORTED_MISSING_TRANSLATIONS.add(cache_doc_id)
+        return
+
+    REPORTED_MISSING_TRANSLATIONS.add(cache_doc_id)
+    fb_set(
+        "missing_translations",
+        cache_doc_id,
+        {"lang": lang, "original": line, "reported_at": ist_now().isoformat()},
+    )
+
+    lang_name = LANGUAGE_FULL_NAMES.get(lang, lang).title()
+    message = random.choice(MISSING_TRANSLATION_TEMPLATES).format(lang_name=lang_name, line=line)
+    message += f"\n\nCopy karke \"Train Translation\" mein paste kar do:\n{lang_name} = {line} = "
+
+    try:
+        asyncio.ensure_future(telegram_app.bot.send_message(ADMIN_STATE["admin_id"], message))
+    except Exception:
+        pass
+
+
+def _translate_line(line, lang):
+    """Translate a single short line of text, using only the hand-trained
+    Firestore cache.
+
+    As of version 3.1: live/automatic translation (both Blind Indian Tech
+    Support AI and the older Google-Translate-based path) has been removed
+    from this function entirely. Every translation now comes only from the
+    translation_cache collection - filled either by the community /suggest
+    flow or, more commonly now, by the admin's "Train Translation" panel
+    button. If a line has not been trained for the requested language yet,
+    the original English line is shown to the user immediately (no waiting
+    on any API call), and the admin is notified once so it can be trained."""
     if not line.strip():
         return line
 
@@ -243,42 +313,18 @@ def _translate_line(line, lang):
         TRANSLATION_CACHE[mem_key] = cached["translated"]
         return cached["translated"]
 
-    translated = None
-
-    # Primary: Blind Indian Tech Support AI.
-    full_name = LANGUAGE_FULL_NAMES.get(lang)
-    if BITS_AI_AVAILABLE and full_name:
-        translated = bits_ai_translate_line(line, full_name)
-
-    # Fallback: the older Google-Translate-based path, only used if Blind
-    # Indian Tech Support AI did not return a usable translation.
-    if (not translated or not translated.strip()) and TRANSLATOR_AVAILABLE:
-        target = TRANSLATE_LANG_CODES.get(lang)
-        if target:
-            try:
-                translated = GoogleTranslator(source="en", target=target).translate(line)
-            except Exception:
-                translated = None
-
-    if not translated or not translated.strip():
-        logger.warning(f"Translation failed for line, falling back to English: {line[:50]}")
-        return line
-
-    TRANSLATION_CACHE[mem_key] = translated
-    fb_set("translation_cache", cache_doc_id, {"lang": lang, "original": line, "translated": translated})
-    return translated
+    report_missing_translation(line, lang, cache_doc_id)
+    return line
 
 
 def tr(text, lang):
     """Translate an English string (which may have multiple lines) into the
     target language, line by line, so a problem with one line never breaks
-    the rest of the message. Falls back silently to English wherever a
-    single line's translation is not possible.
+    the rest of the message.
 
-    As of version 3.0, this no longer requires deep-translator to be
-    available - Blind Indian Tech Support AI (our own engine) is the
-    primary translator, and deep-translator is only a secondary fallback
-    (see _translate_line)."""
+    As of version 3.1, this relies entirely on the hand-trained translation
+    cache (see _translate_line) - there is no longer any live/automatic
+    translation step here."""
     if not text or lang == "en":
         return text
     lines = text.split("\n")
@@ -309,7 +355,7 @@ def decode_key(encoded_key):
 # three new features in this release: Ask Your PDF, AI Summary Backup, and
 # Simplify Text.
 # ---------------------------------------------------------------------------
-BITS_AI_VERSION = "1.1"
+BITS_AI_VERSION = "1.2"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # Tried in this order. Keeping more than one means a single retired or
@@ -325,6 +371,19 @@ if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
         groq_client = None
 
 BITS_AI_AVAILABLE = groq_client is not None
+
+# One-time startup diagnostic. This prints once when the bot boots, so that
+# the real reason Blind Indian Tech Support AI is unavailable (missing
+# package vs missing/empty API key) is visible in the Render logs
+# immediately, instead of having to guess from downstream symptoms like
+# failed translations or failed Ask Your PDF answers. The key itself is
+# never printed, only whether one was found.
+logger.warning(
+    f"[Blind Indian Tech Support AI startup check] "
+    f"SDK installed: {GROQ_SDK_AVAILABLE} | "
+    f"API key found in environment: {bool(GROQ_API_KEY)} | "
+    f"Engine available: {BITS_AI_AVAILABLE}"
+)
 
 
 def bits_ai_chat(system_prompt, user_prompt, max_tokens=1024, temperature=0.3):
@@ -2240,6 +2299,7 @@ ADMIN_MENU = InlineKeyboardMarkup(
         [InlineKeyboardButton("Delete User Account", callback_data="admin_deleteuser")],
         [InlineKeyboardButton("Message a Specific User", callback_data="admin_msguser")],
         [InlineKeyboardButton("Most Used Feature", callback_data="admin_mostused")],
+        [InlineKeyboardButton("Train Translation", callback_data="admin_traintranslation")],
         [InlineKeyboardButton("Clear Database", callback_data="admin_cleardb")],
     ]
 )
@@ -2410,6 +2470,62 @@ async def handle_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text(f"Could not send message: {e}", reply_markup=ADMIN_MENU)
         return
 
+    if session.get("admin_step") == "awaiting_train_translation":
+        session.pop("admin_step", None)
+        full_name_to_code = {v.lower(): k for k, v in LANGUAGE_FULL_NAMES.items()}
+        trained = []
+        failed = []
+
+        for raw_line in text.split("\n"):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            parts = raw_line.split("=", 2)
+            if len(parts) != 3:
+                failed.append(f"Bad format (needs two '=' signs): {raw_line[:50]}")
+                continue
+
+            lang_label, english_text, translation = (p.strip() for p in parts)
+            lang_code = None
+            if lang_label.lower() in TRANSLATE_LANG_CODES:
+                lang_code = lang_label.lower()
+            elif lang_label.lower() in full_name_to_code:
+                lang_code = full_name_to_code[lang_label.lower()]
+
+            if not lang_code:
+                failed.append(f"Unknown language '{lang_label}': {raw_line[:50]}")
+                continue
+            if not english_text or not translation:
+                failed.append(f"Empty English line or translation: {raw_line[:50]}")
+                continue
+
+            cache_doc_id = _cache_key(english_text, lang_code)
+            fb_set(
+                "translation_cache",
+                cache_doc_id,
+                {
+                    "lang": lang_code,
+                    "original": english_text,
+                    "translated": translation,
+                    "trained_by_admin": True,
+                },
+            )
+            TRANSLATION_CACHE[(lang_code, english_text)] = translation
+            trained.append(f"{lang_label}: {english_text[:30]}")
+
+            # This line now has a real translation, so clear any earlier
+            # "missing translation" report for it - if it ever goes missing
+            # again in the future, the admin will be notified afresh.
+            fb_delete("missing_translations", cache_doc_id)
+            REPORTED_MISSING_TRANSLATIONS.discard(cache_doc_id)
+
+        reply_lines = [f"Trained {len(trained)} translation(s) successfully."]
+        if failed:
+            reply_lines.append(f"\n{len(failed)} line(s) could not be used:")
+            reply_lines.extend(failed[:10])
+        await update.message.reply_text("\n".join(reply_lines), reply_markup=ADMIN_MENU)
+        return
+
 
 async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2498,6 +2614,20 @@ async def admin_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_msguser":
         session["admin_step"] = "awaiting_msguser_id"
         await query.edit_message_text("Type the Telegram ID of the user you want to message:")
+
+    elif data == "admin_traintranslation":
+        session["admin_step"] = "awaiting_train_translation"
+        await query.edit_message_text(
+            "Send the translations you want to train, one per line, in this exact format:\n\n"
+            "LanguageName = English line = Translation\n\n"
+            "Example (you can send several lines at once in one message):\n"
+            "Urdu = Welcome to the bot = خوش آمدید\n"
+            "Hindi = Welcome to the bot = बॉट में आपका स्वागत है\n"
+            "Punjabi = Welcome to the bot = ਬੋਟ ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ\n\n"
+            "The English line on both sides of the '=' must match exactly what the bot actually "
+            "sends. These are saved permanently and will be used instead of AI/auto translation "
+            "for that exact English line, for every user, from now on."
+        )
 
     elif data == "admin_cleardb":
         await query.edit_message_text(
